@@ -1,0 +1,14 @@
+prefix=/c/Users/hayah/Downloads/FFmpeg-master/FFmpeg-master/android_build/armeabi-v7a
+exec_prefix=${prefix}
+libdir=/c/Users/hayah/Downloads/FFmpeg-master/FFmpeg-master/android_build/armeabi-v7a/lib
+includedir=/c/Users/hayah/Downloads/FFmpeg-master/FFmpeg-master/android_build/armeabi-v7a/include
+
+Name: libswscale
+Description: FFmpeg image rescaling library
+Version: 9.3.100
+Requires: 
+Requires.private: libavutil >= 60.23.100
+Conflicts:
+Libs: -L${libdir}  -lswscale 
+Libs.private: -lm -latomic
+Cflags: -I${includedir}

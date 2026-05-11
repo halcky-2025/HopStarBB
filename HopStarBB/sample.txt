@@ -1,0 +1,10 @@
+﻿<tabcontrol|
+  <tabwindow|>
+  <tab>
+  <tab>
+  <tab|
+    Yukkieの部屋
+    <tabpage|
+    >
+  >
+>

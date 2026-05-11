@@ -1,0 +1,3 @@
+*.dll
+*.ilk
+clang3/*.exe

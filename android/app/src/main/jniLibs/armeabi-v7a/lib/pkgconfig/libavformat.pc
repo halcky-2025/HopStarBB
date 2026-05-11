@@ -1,0 +1,14 @@
+prefix=/c/Users/hayah/Downloads/FFmpeg-master/FFmpeg-master/android_build/armeabi-v7a
+exec_prefix=${prefix}
+libdir=/c/Users/hayah/Downloads/FFmpeg-master/FFmpeg-master/android_build/armeabi-v7a/lib
+includedir=/c/Users/hayah/Downloads/FFmpeg-master/FFmpeg-master/android_build/armeabi-v7a/include
+
+Name: libavformat
+Description: FFmpeg container format library
+Version: 62.8.102
+Requires: 
+Requires.private: libavcodec >= 62.23.102, libswresample >= 6.2.100, libavutil >= 60.23.100
+Conflicts:
+Libs: -L${libdir}  -lavformat 
+Libs.private: -lm -latomic -lz
+Cflags: -I${includedir}

@@ -1,0 +1,11 @@
+add_subdirectory(../../.. SDL3)
+
+add_library(main SHARED
+    src/main/cpp/main.cpp
+)
+
+target_link_libraries(main
+    SDL3::SDL3
+    android
+    log
+)

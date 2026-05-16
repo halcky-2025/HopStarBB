@@ -1,0 +1,3 @@
+[submodule "HopStarBB/android/app/jni/src/bgfx"]
+	path = HopStarBB/android/app/jni/src/bgfx
+	url = https://github.com/bkaradzic/bgfx

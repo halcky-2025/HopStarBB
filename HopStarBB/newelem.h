@@ -80,6 +80,11 @@ struct LayerInfo {
 	// タイルFBO描画状態: 設定されている間、push関数がタイルごとにコマンドを展開する
 	TiledTextureInfo* tiledTarget = nullptr;       // 描画先のタイル情報 (push で参照、submit では使わない)
 	ImageId tiledTargetImageId = 0;                 // タイルテクスチャの安定 ID (submit 時の lookup 用)
+	// タイル展開で「このタイル使うよ」を ImageMaster の ensure-tile queue に積むための
+	// 参照。setCurrentSlotLayer / addLayer 系で frame ごとにセットされる。
+	//   shader.h の LayerInfo::push が tile 展開時に shader_queueEnsureTile を呼ぶ。
+	//   ヘルパは ugui.h で実装 (imas.h を newelem.h から直接 include しないため)。
+	ImageMaster* master = nullptr;
 	// 「このコマンドはタイル展開対象」の識別用 sentinel。レイヤーが所有する安定アドレス。
 	// 旧設計では std::vector<Tile> 要素アドレス (&firstTile.fbo) を使っていたが、
 	// resize で tiledTextures_.erase されるとベクタごと破壊されるので不正だった。

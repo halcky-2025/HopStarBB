@@ -11,6 +11,9 @@ TiledTextureInfo* shader_lookupTiledTexture(ImageMaster& master, ImageId id);
 // lazy 確保 forward (= ImageMaster::ensureTile を呼ぶ wrapper)。shader.h は imas.h
 // を直接 include しないので関数経由でアクセス。実装は ugui.h。
 bool              shader_ensureTile        (ImageMaster& master, ImageId id, int tileIdx);
+// 「このタイル使うよ」を render thread の beginFrame で eager allocate するため
+// ImageMaster の ensure-tile queue に push する。LayerInfo::push のタイル展開から呼ぶ。
+void              shader_queueEnsureTile   (ImageMaster& master, ImageId id, int tileIdx);
 
 // ============================================================
 // LayerInfo（レイヤー管理）
@@ -43,6 +46,8 @@ void LayerInfo::push(DrawCommand* cmd) {
                 tilecmd->tileIndex    = ti;
                 tilecmd->viewId       = tiledBaseViewId + (uint64_t)ti;
                 cmds.push_back(tilecmd);
+                // 次フレーム頭の beginFrame() でこの tile を eager allocate するよう予約。
+                if (master) shader_queueEnsureTile(*master, tiledTargetImageId, ti);
             }
             delete cmd;
             return;
@@ -100,6 +105,8 @@ void LayerInfo::push(DrawCommand* cmd) {
                 tilecmd->tileIndex    = ti;
                 tilecmd->viewId = tiledBaseViewId + (uint64_t)ti;
                 cmds.push_back(tilecmd);
+                // 次フレーム頭の beginFrame() でこの tile を eager allocate するよう予約。
+                if (master) shader_queueEnsureTile(*master, tiledTargetImageId, ti);
             }
         }
         delete cmd;

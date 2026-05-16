@@ -250,6 +250,10 @@ public:
         shelfAtlas_.beginFrame();
         groupManager_.beginFrame();
         processOffscreenQueue();
+        // tile lazy 確保: GoThread が「使うよ」と push したタイルを一括 allocate。
+        // processOffscreenQueue の後 (= 新 offscreen の metadata が反映済み) でないと
+        // tiledTextures_ の entry を見つけられないケースがあるので順序を守る。
+        processEnsureTileQueue();
     }
 
     void collectGarbage() {
@@ -1416,6 +1420,35 @@ public:
     std::vector<OffscreenCreateRequest> offscreenCreateQueue_;
     std::vector<OffscreenResizeRequest> offscreenResizeQueue_;
     std::vector<ImageId> offscreenDestroyQueue_;
+
+    // ensure-tile queue: GoThread (LayerInfo::push でタイル展開時) が「このタイル
+    // 使う」と push してきた (id, tileIdx) を貯める。render thread の beginFrame で
+    // drain して bgfx::createTexture2D / createFrameBuffer + initFreshRenderTargetLayout
+    // を eager 実行する。renderAllCommands の中で createBuffer する旧 lazy 方式は
+    // 描画 view と layout-init view (255) の順序がぶつかって絵を壊すので廃止。
+    std::mutex ensureTileQueueMutex_;
+    std::vector<std::pair<ImageId, int>> ensureTileQueue_;
+
+    void queueEnsureTile(ImageId id, int tileIdx) {
+        std::lock_guard lock(ensureTileQueueMutex_);
+        ensureTileQueue_.emplace_back(id, tileIdx);
+    }
+
+    void processEnsureTileQueue() {
+        std::vector<std::pair<ImageId, int>> reqs;
+        {
+            std::lock_guard lock(ensureTileQueueMutex_);
+            reqs.swap(ensureTileQueue_);
+        }
+        // 重複除去 (= 同一 (id, tileIdx) が複数 LayerInfo::push から積まれるのは普通)
+        std::sort(reqs.begin(), reqs.end());
+        reqs.erase(std::unique(reqs.begin(), reqs.end()), reqs.end());
+        for (auto& [id, idx] : reqs) {
+            // skipLayoutInit=false: render より先に走るので layout init clear は
+            // UI 描画 view より前に submit され、絵を上書きしない。
+            ensureTile(id, idx, /*skipLayoutInit=*/false);
+        }
+    }
 
     void processOffscreenQueue() {
         std::vector<OffscreenCreateRequest> creates;

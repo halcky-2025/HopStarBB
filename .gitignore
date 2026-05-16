@@ -381,7 +381,7 @@ HopStarBB/android/build/
 
 # Toolchains / large 3rd-party (not source)
 clang3/
-HopStarBB/android/app/jni/src/bgfx/
+# bgfx は git submodule で管理する (= .gitmodules で pin)
 
 # Claude Code local state
 .claude/

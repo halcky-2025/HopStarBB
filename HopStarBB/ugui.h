@@ -1212,6 +1212,9 @@ public:
             if (layerW <= 0) layerW = 1200;
             if (layerH <= 0) layerH = 800;
             auto& layer = q->setCurrentSlotLayer({}, 1.0f, true, true, layerW, layerH);
+            // LayerInfo::push がタイル展開時に「このタイル使うよ」を ensure-tile queue に
+            // 積むため、master 参照をセット。render thread の beginFrame で eager 確保される。
+            layer.master = &mainGC->hoppy->master;
             // 離れたオフスクリーン用: ルートから到達できなかったもの（layout==trueのまま）をMeasure
             for (int i = 0; i < mainLocal->screens->size; i++) {
                 Offscreen* screen = (Offscreen*)*get_list(mainLocal->screens, i);
@@ -2340,6 +2343,9 @@ bool shader_ensureTile(ImageMaster& master, ImageId id, int tileIdx) {
     // initFreshRenderTargetLayout (view 255 clear) をスキップする。
     // clear が描画より後に実行されて結果を上書きする問題を防ぐ。
     return master.ensureTile(id, tileIdx, /*skipLayoutInit=*/true);
+}
+void shader_queueEnsureTile(ImageMaster& master, ImageId id, int tileIdx) {
+    master.queueEnsureTile(id, tileIdx);
 }
 TiledResolveResult myResolveTiledForDraw(ThreadGC* thgc, ImageId imageId) {
     return thgc->hoppy->master.resolveTiledForDraw(imageId);

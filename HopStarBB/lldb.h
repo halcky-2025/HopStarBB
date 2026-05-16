@@ -24,6 +24,8 @@
 #include <cstring>
 #include <cstdio>
 #include <thread>
+
+#ifdef _WIN32
 #include <windows.h>
 
 // ------------------------------------------------------------
@@ -841,3 +843,110 @@ inline bool lldb_compileAndDebug(ThreadGC* thgc, LLDBClient* c,
 	lldb_startDebug(thgc, c, mainExeAbs, breakpointFile, breakpointLine);
 	return true;
 }
+
+#else // _WIN32
+
+// =============================================================================
+// 非 Windows プラットフォーム用 LLDBClient スタブ
+// =============================================================================
+// LLDB driver / clang3 / DLL ロードは Windows 限定の機能。
+// Android では「使えない状態」を表現するためのダミー実装を提供する。
+// UI 側コードはこれらの関数を呼ぶが、実体は何もしない / safe default を返す。
+// 将来 LLDB Android port を統合する時はこの #else ブランチを置き換える。
+// =============================================================================
+
+// 非 Windows プラットフォーム: HANDLE を void* にエイリアスしてレイアウト互換を確保。
+typedef void* HANDLE;
+
+struct BpEntry {
+    String*  file;
+    uint32_t line;
+    bool     enabled;
+};
+
+struct VarRow {
+    int      depth;
+    String*  name;
+    String*  type;
+    String*  value;
+    int      expand;
+    uint32_t nextOffset;
+};
+
+struct FrameRow {
+    String* func;
+    String* file;
+    String* line;
+};
+
+// Windows 版 (lldb.h L82 付近) と同一レイアウトのスタブ。実機能はないが、
+// 上位コード (extorch.h / othelem.h) が各フィールドにアクセスしても通るようにする。
+struct LLDBClient {
+    AtomicInt paused;
+    AtomicInt running;
+    AtomicInt varsReady;
+    AtomicInt framesReady;
+    AtomicInt expandReady;
+
+    Mutex   bpsMutex;
+    List*   breakpoints;
+
+    Mutex   varsMutex;
+    List*   pendingVars;
+    Mutex   framesMutex;
+    List*   pendingFrames;
+    Mutex   expandMutex;
+    String* expandResultPath;
+    List*   expandResultRows;
+    List*   expandedPaths;
+    List*   expandRequestQueue;
+    AtomicInt expandInFlight;
+
+    HANDLE evResume;
+    HANDLE evStop;
+    HANDLE evBpUpdate;
+    HANDLE evStepIn;
+    HANDLE evStepOver;
+    HANDLE evStepOut;
+    HANDLE evExpand;
+    HANDLE bpShmHandle;
+    void*  bpShmView;
+    HANDLE expandShmHandle;
+    void*  expandShmView;
+    HANDLE driverProcess;
+    HANDLE driverJob;
+
+    NewElement* highlightCell;
+    uint32_t    highlightOldFill;
+    int         highlightHadBackground;
+};
+
+inline LLDBClient* getLLDBClient(ThreadGC* thgc) {
+    (void)thgc;
+    static LLDBClient stub = {};
+    return &stub;
+}
+inline void BpEntryCheck       (ThreadGC*, char*) {}
+inline void VarRowCheck        (ThreadGC*, char*) {}
+inline void FrameRowCheck      (ThreadGC*, char*) {}
+inline void LLDBClientCheck    (ThreadGC*, char*) {}
+inline void LLDBClientFinalize (ThreadGC*, char*) {}
+inline bool lldb_isPaused (LLDBClient*) { return false; }
+inline bool lldb_isRunning(LLDBClient*) { return false; }
+inline void lldb_resume   (LLDBClient*) {}
+inline void lldb_stop     (LLDBClient*) {}
+inline void lldb_stepIn   (LLDBClient*) {}
+inline void lldb_stepOver (LLDBClient*) {}
+inline void lldb_stepOut  (LLDBClient*) {}
+inline void lldb_setBreakpoint(ThreadGC*, LLDBClient*,
+                               const char*, uint32_t, bool) {}
+inline bool lldb_compileAndDebug(ThreadGC*, LLDBClient*,
+                                 const char*,
+                                 const char* = nullptr,
+                                 uint32_t    = 0) { return false; }
+inline bool lldb_requestExpand     (LLDBClient*, const char*, int, uint32_t) { return false; }
+inline void lldb_rememberExpandPath(ThreadGC*, LLDBClient*, String*) {}
+inline void lldb_pumpExpandQueue   (LLDBClient*) {}
+inline void lldb_replayExpansions  (ThreadGC*, LLDBClient*) {}
+
+#endif // _WIN32

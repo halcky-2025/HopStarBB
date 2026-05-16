@@ -58,16 +58,27 @@ struct ImageLocation {
 
     Type type = Type::None;
 
-    // 各Atlas用の内部キー
-    union {
-        struct { uint64_t glyphKey; } font;           // FontId + codepoint
-        struct { ThumbnailHandle handle; } thumbnail; // Grid/Shelf
-    };
+    // ★全 placement で共通の stable storage。
+    // - cmd push は &slot.handle / &slot.fbo / &slot.size のアドレスを捕まえる
+    // - GoThread (loadSync) で entry を作った瞬間からアドレスは不変
+    // - render thread が upload 完了時に slot.handle 等を埋める
+    //   ・Standalone: createStandaloneInternal が atlas-less な実 handle を入れる
+    //   ・GridAtlas:  uploadToGpuInternal が atlas page texture を入れる
+    //   ・ShelfAtlas: 同上
+    // - eviction / page GC で texture が動いた場合も、render thread が
+    //   slot.handle を新しい値に書き換えるだけ。cmd 側ポインタは不変。
+    TextureSlot slot;
 
     // 合計コンテンツ寸法は uint16_t を超え得るので int 化 (= ugui.h 67600px Y で 2064 truncate 防止)。
     int width = 0;
     int height = 0;
     bool isPending = false;
+
+    // 各Atlas用の内部キー (placement 固有メタ。union で省サイズ)
+    union {
+        struct { uint64_t glyphKey; } font;           // FontId + codepoint
+        struct { ThumbnailHandle handle; } thumbnail; // Grid/Shelf
+    };
 
     ImageLocation() : font{ 0 } {}
 };
@@ -226,6 +237,14 @@ public:
 
     void beginFrame() {
         ++currentFrame_;
+        // ★ GoThread が createNewPage で作った未 init の atlas page に対し、
+        //   render thread 上で bgfx::createTexture2D を実行 (= placeholder slot を
+        //   実 GPU テクスチャに昇格)。これより前の段階では page->m_texture は
+        //   INVALID。imageLocations_[id].slot.handle (cmd 側の捕まえポインタ) は
+        //   registerGridImage / registerShelfImage 時に atlas page texture を
+        //   コピーするので、ensure → register の順で実 handle 値が伝播する。
+        gridAtlas_.ensureAllBgfxTextures();
+        shelfAtlas_.ensureAllBgfxTextures();
         fontAtlas_.beginFrame();
         gridAtlas_.beginFrame();
         shelfAtlas_.beginFrame();
@@ -420,14 +439,14 @@ public:
             return result;
         }
 
-        bgfx::TextureHandle& tex = fontAtlas_.getPageTexture(gi->pageIndex);
-        if (!bgfx::isValid(tex)) {
+        TextureSlot* slot = fontAtlas_.getPageSlot(gi->pageIndex);
+        if (!slot || !bgfx::isValid(slot->handle)) {
             result.status = ResolveStatus::Evicted;
             return result;
         }
 
         result.status = ResolveStatus::Success;
-        result.resolved.texture = &tex;
+        result.resolved.slot = slot;
         result.resolved.u0 = gi->u0;
         result.resolved.v0 = gi->v0;
         result.resolved.u1 = gi->u1;
@@ -440,38 +459,53 @@ public:
         ResolveResult result;
         uint64_t contentId = getImageIdLocal(id);
 
-        // まず Grid で探索
-        float u0, v0, u1, v1;
+        // slot は imageLocations_[id].slot を使う (= GoThread が事前確保した stable storage)。
+        // UV / size は atlas 側 (page 内 sub-rect) が真値だが、atlas 登録前でも slot さえ
+        // 存在すれば Success を返す方針 (= cmd は &slot->handle を捕まえれば render thread
+        // が後で handle を埋める。UV はデフォルト 0..1 で取り敢えず返し、registerGridImage
+        // 等で正値に更新される)。
+        TextureSlot* slot = nullptr;
+        int locW = 0, locH = 0;
+        {
+            std::lock_guard lock(locationMutex_);
+            auto it = imageLocations_.find(id);
+            if (it != imageLocations_.end()) {
+                slot = &it->second.slot;
+                locW = it->second.width;
+                locH = it->second.height;
+            }
+        }
+
+        // slot 無し = imageLocations_[id] 未登録 → 正真正銘の未知 id。
+        if (!slot) {
+            result.status = ResolveStatus::NotFound;
+            return result;
+        }
+
+        // UV は atlas が知ってればそれを使う、無ければ 0..1 で返す。
+        // ★ computeUVAnyState を使う: 通常の getUV は state==Ready を要求するが、
+        //   reserveGridPlaceholder 直後は state==Loading なので false 返してしまい
+        //   UV が 0..1 (全表示) になっていた。位置 (r.x/r.y) は acquire 時に確定済
+        //   なので state 無視で UV 計算しても正しい。
+        float u0 = 0, v0 = 0, u1 = 1, v1 = 1;
         auto gridHandle = gridAtlas_.find(contentId);
         if (gridHandle) {
-            float u0, v0, u1, v1;
-            if (gridAtlas_.getUV(*gridHandle, u0, v0, u1, v1)) {
-                result.status = ResolveStatus::Success;
-                result.resolved.texture = &gridAtlas_.getTexture(gridHandle->pageIndex);
-                result.resolved.u0 = u0;
-                result.resolved.v0 = v0;
-                result.resolved.u1 = u1;
-                result.resolved.v1 = v1;
-                return result;
+            gridAtlas_.computeUVAnyState(*gridHandle, u0, v0, u1, v1);
+        } else {
+            auto shelfHandle = shelfAtlas_.find(contentId);
+            if (shelfHandle) {
+                shelfAtlas_.computeUVAnyState(*shelfHandle, u0, v0, u1, v1);
             }
         }
 
-        // 次に Shelf で探索
-        auto shelfHandle = shelfAtlas_.find(contentId);
-        if (shelfHandle) {
-            float u0, v0, u1, v1;
-            if (shelfAtlas_.getUV(*shelfHandle, u0, v0, u1, v1)) {
-                result.status = ResolveStatus::Success;
-                result.resolved.texture = &shelfAtlas_.getTexture(shelfHandle->pageIndex);
-                result.resolved.u0 = u0;
-                result.resolved.v0 = v0;
-                result.resolved.u1 = u1;
-                result.resolved.v1 = v1;
-                return result;
-            }
-        }
-
-        result.status = ResolveStatus::NotFound;
+        result.status = ResolveStatus::Success;
+        result.resolved.slot = slot;
+        result.resolved.u0 = u0;
+        result.resolved.v0 = v0;
+        result.resolved.u1 = u1;
+        result.resolved.v1 = v1;
+        result.resolved.width = (uint16_t)locW;
+        result.resolved.height = (uint16_t)locH;
         return result;
     }
     // ImageId → 描画可能なテクスチャに解決
@@ -496,27 +530,26 @@ public:
         case ImageIdDomain::Memory:
         case ImageIdDomain::Generated:
         case ImageIdDomain::File: {
-            // Check imageLocations_ to determine actual placement
-            std::lock_guard lock(locationMutex_);
-            auto it = imageLocations_.find(id);
-            if (it != imageLocations_.end()) {
-                switch (it->second.type) {
-                case ImageLocation::Type::GridAtlas: {
-                    uint64_t contentId = getImageIdLocal(id);
-                    return resolveThumbnail(id);
-                }
-                case ImageLocation::Type::ShelfAtlas: {
-                    uint64_t contentId = getImageIdLocal(id);
-                    return resolveThumbnail(id);
-                }
-                case ImageLocation::Type::TiledStandalone: {
-                    // タイル画像は最初のタイルを返す（互換用）
-                    // 完全な描画には resolveTiledForDraw() を使うこと
-                    return resolveTiledFirstTile(id);
-                }
-                default:
-                    break;
-                }
+            // Check imageLocations_ to determine actual placement.
+            // ★ type を見るためだけに lock を取り、type だけ snapshot して即解放。
+            //   その後 resolveGridAtlas / resolveShelfAtlas / resolveStandalone を
+            //   再度 lock 経由で呼ぶ (各 resolver が内部で imageLocations_[id].slot
+            //   の stable address を取得して返す)。re-lookup によるオーバーヘッドは
+            //   軽微、deadlock 回避が優先。
+            ImageLocation::Type loctype = ImageLocation::Type::None;
+            {
+                std::lock_guard lock(locationMutex_);
+                auto it = imageLocations_.find(id);
+                if (it != imageLocations_.end()) loctype = it->second.type;
+            }
+            switch (loctype) {
+            case ImageLocation::Type::GridAtlas:
+            case ImageLocation::Type::ShelfAtlas:
+                return resolveThumbnail(id);
+            case ImageLocation::Type::TiledStandalone:
+                return resolveTiledFirstTile(id);
+            default:
+                break;
             }
             return resolveStandalone(id);
         }
@@ -533,7 +566,9 @@ public:
         auto result = resolve(id);
         if (!result.isReady()) return false;
 
-        outTex = *result.resolved.texture;
+        if (auto* tp = result.resolved.texture()) {
+            outTex = *tp;
+        }
         u0 = result.resolved.u0;
         v0 = result.resolved.v0;
         u1 = result.resolved.u1;
@@ -1086,6 +1121,110 @@ public:
         return (bgfx::TextureHandle*)(&shelfAtlas_.getTexture(pageIndex));
     }
 
+    // ImageId → TextureSlot* を取得 (= handle / fbo / size の stable な置き場).
+    //
+    // 描画 cmd はこのポインタを捕まえる → render thread がそのまま slot の
+    // 中の `handle` / `fbo` 値を埋めるので、cmd 側は同じポインタを deref する
+    // だけで最新値を見られる (アドレス不変、値だけ INVALID → valid に変化)。
+    //
+    // 全 placement (Standalone / GridAtlas / ShelfAtlas / FontAtlas) で
+    // `imageLocations_[id].slot` を返す。これが「**imageId ごとの stable storage**」。
+    // 各 placement の render thread upload path が `loc.slot.handle` / `loc.slot.fbo`
+    // / `loc.slot.size` を埋める責任を持つ。
+    //
+    // Tiled は tile 単位の表現なのでここでは扱わない (=
+    // mygetTiledTextureInfo + tile index 経由が必要)。
+    TextureSlot* resolveSlot(ImageId id) {
+        if (id == 0) return nullptr;
+        std::lock_guard lock(locationMutex_);
+        auto it = imageLocations_.find(id);
+        if (it == imageLocations_.end()) return nullptr;
+        return &it->second.slot;
+    }
+
+    // GoThread から呼ばれる Standalone slot の事前確保 (= placeholder)。
+    // bgfx は呼ばない。unordered_map に slot を入れて handle = INVALID のまま
+    // 戻すだけ。実 bgfx テクスチャは後で render thread の uploadToGpuInternal が
+    // info.handle に値を書き込んで完成させる。
+    // cmd push が `&info.handle` をこの時点で捕まえてもアドレスは不変なので
+    // 安全 (cmd は描画時点では valid な handle を見る)。
+    void reserveStandalonePlaceholder(ImageId id, uint16_t w, uint16_t h,
+                                       ImageUsage usage, bool persistent) {
+        {
+            std::lock_guard lock(standaloneMutex_);
+            auto [it, inserted] = standaloneTextures_.emplace(id, StandaloneTextureInfo{});
+            auto& info = it->second;
+            if (inserted) {
+                info.handle = BGFX_INVALID_HANDLE;
+                info.fbo    = BGFX_INVALID_HANDLE;
+                info.size   = { w, h };
+                info.persistent = persistent;
+                info.origin = ImageOrigin::File;
+                info.refCount = 1;
+                info.lastUsedFrame = currentFrame_;
+            }
+            // 既に entry がある場合は touch だけ
+            info.lastUsedFrame = currentFrame_;
+        }
+        // ImageLocation 側の slot にも placeholder (INVALID + size) を入れておく。
+        // cmd は &imageLocations_[id].slot.handle を握る (resolveSlot 経由)。
+        {
+            std::lock_guard lock(locationMutex_);
+            auto& loc = imageLocations_[id];
+            loc.type = ImageLocation::Type::Standalone;
+            loc.width = w;
+            loc.height = h;
+            loc.isPending = true;
+            loc.slot.handle = BGFX_INVALID_HANDLE;
+            loc.slot.fbo    = BGFX_INVALID_HANDLE;
+            loc.slot.size   = { w, h };
+        }
+    }
+
+    // GoThread から呼ばれる GridAtlas slot の事前確保。
+    // gridAtlas_.acquire() はページが既に存在する状態では bgfx を呼ばず slot 索引
+    // を返すだけなので GoThread 安全 (ImageMaster::initialize で page 0 は事前生成
+    // 済み = 既に valid な page texture が存在)。
+    // slot.handle には page texture handle (= gridAtlas_.getTexture(pageIndex)) を
+    // 入れる。値そのもののコピーで OK で、page が evict されない限り変わらない。
+    bool reserveGridPlaceholder(ImageId id, uint64_t contentId, uint16_t w, uint16_t h) {
+        bool needsLoad = false;
+        ThumbnailHandle handle = gridAtlas_.acquire(contentId, needsLoad);
+        if (!handle.isValid()) return false;
+
+        std::lock_guard lock(locationMutex_);
+        auto& loc = imageLocations_[id];
+        loc.type = ImageLocation::Type::GridAtlas;
+        loc.thumbnail.handle = handle;
+        loc.width = w;
+        loc.height = h;
+        loc.isPending = needsLoad;
+        // ★ page texture を slot.handle にコピー。cmd の捕まえたポインタはここを指す。
+        loc.slot.handle = gridAtlas_.getTexture(handle.pageIndex);
+        loc.slot.fbo    = BGFX_INVALID_HANDLE;
+        loc.slot.size   = { w, h };
+        return true;
+    }
+
+    // GoThread から呼ばれる ShelfAtlas slot の事前確保 (Grid と同じ理屈)。
+    bool reserveShelfPlaceholder(ImageId id, uint64_t contentId, uint16_t w, uint16_t h) {
+        bool needsLoad = false;
+        ThumbnailHandle handle = shelfAtlas_.acquire(contentId, w, h, needsLoad);
+        if (!handle.isValid()) return false;
+
+        std::lock_guard lock(locationMutex_);
+        auto& loc = imageLocations_[id];
+        loc.type = ImageLocation::Type::ShelfAtlas;
+        loc.thumbnail.handle = handle;
+        loc.width = w;
+        loc.height = h;
+        loc.isPending = needsLoad;
+        loc.slot.handle = shelfAtlas_.getTexture(handle.pageIndex);
+        loc.slot.fbo    = BGFX_INVALID_HANDLE;
+        loc.slot.size   = { w, h };
+        return true;
+    }
+
     // ImageId → 永続的なTextureHandleポインタを取得（配置タイプに応じて）
     bgfx::TextureHandle* resolveTexturePtr(ImageId id) {
         if (id == 0) return nullptr;
@@ -1235,6 +1374,7 @@ public:
         info.size.x = newW16;
         info.size.y = newH16;
         info.lastUsedFrame = currentFrame_;
+        initFreshRenderTargetLayout(newFbo, newW16, newH16);
 
         // 配置情報を更新
         {
@@ -1319,20 +1459,18 @@ public:
         // 作成（破棄対象はスキップ）
         for (auto& req : creates) {
             if (destroySet.count(req.id)) continue;
-            if (createOffscreenInternal(req.id, req.width, req.height, req.persistent, req.pageW, req.pageH)) {
-                if (req.dest) {
-                    auto textureInfo = getStandaloneTexture(req.id);
-                }
+            bool ok = createOffscreenInternal(req.id, req.width, req.height, req.persistent, req.pageW, req.pageH);
+            if (ok && req.dest) {
+                auto textureInfo = getStandaloneTexture(req.id);
             }
         }
 
         // リサイズ（破棄対象はスキップ）
         for (auto& req : resizes) {
             if (destroySet.count(req.id)) continue;
-            if (resizeOffscreenInternal(req.id, req.width, req.height, req.pageW, req.pageH)) {
-                if (req.dest) {
-                    auto textureInfo = getStandaloneTexture(req.id);
-                }
+            bool ok = resizeOffscreenInternal(req.id, req.width, req.height, req.pageW, req.pageH);
+            if (ok && req.dest) {
+                auto textureInfo = getStandaloneTexture(req.id);
             }
         }
         if (size != 0)bgfx::frame();
@@ -1511,8 +1649,13 @@ public:
     const FontAtlas& fontAtlas() const { return fontAtlas_; }
 
     // FontAtlas 便利メソッド（委譲）
+    // 入力 size は論理ピクセル。getFont と同じ g_uiScale を掛けて物理ピクセルに
+    // 揃え、getFont("sans",16) → FontId("sans", scaled) の lookup が一致する
+    // フォントを atlas に登録する。
     FontId registerFont(const char* name, const std::string& fontPath, int size) {
-        return fontAtlas_.registerFont(name, fontPath, size);
+        int physSize = (int)((float)size * GetUiScale() + 0.5f);
+        if (physSize < 1) physSize = 1;
+        return fontAtlas_.registerFont(name, fontPath, physSize);
     }
 
     void setFallbackChain(FontId primary, std::initializer_list<FontId> fallbacks) {
@@ -1761,6 +1904,12 @@ public:
         loc.width = width;
         loc.height = height;
         loc.isPending = false;
+        // ★ slot を atlas page texture で埋める。cmd が捕まえた &loc.slot.handle が有効化。
+        //   atlas page handle 自体は安定 (page 構造体内の m_texture 値) なのでコピーで OK。
+        //   evict / page 切り替え時はその上書きが必要 (TODO)。
+        loc.slot.handle = gridAtlas_.getTexture(handle.pageIndex);
+        loc.slot.size = { (int)width, (int)height };
+        loc.slot.fbo = BGFX_INVALID_HANDLE;
     }
 
     // Shelf画像を登録（ImageLoader用）
@@ -1772,6 +1921,10 @@ public:
         loc.width = width;
         loc.height = height;
         loc.isPending = false;
+        // ★ slot を atlas page texture で埋める (Grid と同様)。
+        loc.slot.handle = shelfAtlas_.getTexture(handle.pageIndex);
+        loc.slot.size = { (int)width, (int)height };
+        loc.slot.fbo = BGFX_INVALID_HANDLE;
     }
 
     // Standalone作成（ID指定で、ImageLoader用）
@@ -1788,7 +1941,7 @@ public:
     ResolvedTexture getPlaceholder() {
         const auto& white = fontAtlas_.getWhitePixel();
         ResolvedTexture p;
-        p.texture = &fontAtlas_.getPageTexture(white.pageIndex);
+        p.slot = fontAtlas_.getPageSlot(white.pageIndex);
         p.u0 = white.u0; p.v0 = white.v0;
         p.u1 = white.u1; p.v1 = white.v1;
         p.width = white.width;
@@ -1832,7 +1985,38 @@ public:
         }
         tile.handle = colorHandle;
         tile.fbo    = fbo;
+        initFreshRenderTargetLayout(fbo, tile.w, tile.h);
         return true;
+    }
+
+    // 新規 lazy 生成された RT FBO は Vulkan 上 VK_IMAGE_LAYOUT_UNDEFINED のまま。
+    // producer pass がそのフレームで走らないと、consumer 側が UNDEFINED の
+    // テクスチャを sample しようとして renderer_vk が assert する。
+    // 初期化専用 view を1つ消費して clear+touch しておくと、bgfx が必ず1度
+    // レンダーパスを走らせ、layout が SHADER_READ_ONLY_OPTIMAL へ遷移する。
+    //
+    // 通常描画 view (= renderAllCommands で 0 から積む) と衝突しないよう、
+    // 初期化用 view は上位 (255 から下) を round-robin で消費する。
+    void initFreshRenderTargetLayout(bgfx::FrameBufferHandle fbo, uint16_t w, uint16_t h) {
+#if defined(__ANDROID__) || (defined(__linux__) && !defined(__APPLE__))
+        // Vulkan only: VK_IMAGE_LAYOUT_UNDEFINED workaround. On D3D/Metal the
+        // clear here runs AFTER actual rendering views (view id 255 > the low
+        // ids the UI uses), so it overwrites the drawn pixels with gray. Only
+        // apply on Vulkan platforms where the layout transition is needed.
+        if (!bgfx::isValid(fbo) || w == 0 || h == 0) return;
+        uint16_t initViewId = initViewCounter_.fetch_sub(1, std::memory_order_relaxed);
+        if (initViewId < 224) {
+            initViewCounter_.store(255, std::memory_order_relaxed);
+            initViewId = 255;
+        }
+        bgfx::setViewFrameBuffer(initViewId, fbo);
+        bgfx::setViewClear(initViewId, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x808080ff, 1.0f, 0);
+        bgfx::setViewRect(initViewId, 0, 0, w, h);
+        bgfx::setViewScissor(initViewId, 0, 0, 0, 0);
+        bgfx::touch(initViewId);
+#else
+        (void)fbo; (void)w; (void)h;
+#endif
     }
 
     void destroyOffscreenInternal(ImageId id) {
@@ -1866,15 +2050,20 @@ private:
         std::lock_guard lock(standaloneMutex_);
 
         auto it = standaloneTextures_.find(id);
-        if (it == standaloneTextures_.end() || !bgfx::isValid(it->second.handle)) {
+        if (it == standaloneTextures_.end()) {
+            // entry そのものが無いときだけ NotFound。
             result.status = ResolveStatus::NotFound;
             return result;
         }
 
         it->second.lastUsedFrame = currentFrame_;
 
+        // ★ handle が INVALID (= placeholder 段階、render thread が upload 途中) でも
+        //   Success を返す。cmd は &it->second.handle を捕まえれば良くて、
+        //   render thread が後で handle 値を埋める。
         result.status = ResolveStatus::Success;
-        result.resolved.texture = &it->second.handle;
+        // StandaloneTextureInfo は TextureSlot を継承しているので暗黙 upcast 可能
+        result.resolved.slot = &it->second;
         result.resolved.u0 = 0; result.resolved.v0 = 0;
         result.resolved.u1 = 1; result.resolved.v1 = 1;
         result.resolved.width = it->second.size.x;
@@ -1898,7 +2087,8 @@ private:
         // 最初のタイルを返す（互換用、完全な描画には resolveTiledForDraw を使用）
         auto& firstTile = info.tiles[0];
         result.status = ResolveStatus::Success;
-        result.resolved.texture = &firstTile.handle;
+        // Tile は TextureSlot を継承しているので暗黙 upcast
+        result.resolved.slot = &firstTile;
         result.resolved.u0 = 0; result.resolved.v0 = 0;
         result.resolved.u1 = 1; result.resolved.v1 = 1;
         result.resolved.width = info.totalSize.x;
@@ -1919,7 +2109,8 @@ private:
         gridAtlas_.touch(loc.thumbnail.handle);
 
         result.status = ResolveStatus::Success;
-        result.resolved.texture = &gridAtlas_.getTexture(loc.thumbnail.handle.pageIndex);
+        // imageLocations_[id].slot を返す (= 既に loc 参照を渡されてるのでアドレスが取れる)
+        result.resolved.slot = const_cast<TextureSlot*>(&loc.slot);
         result.resolved.u0 = u0; result.resolved.v0 = v0;
         result.resolved.u1 = u1; result.resolved.v1 = v1;
         result.resolved.width = loc.width;
@@ -1939,7 +2130,7 @@ private:
         shelfAtlas_.touch(loc.thumbnail.handle);
 
         result.status = ResolveStatus::Success;
-        result.resolved.texture = &shelfAtlas_.getTexture(loc.thumbnail.handle.pageIndex);
+        result.resolved.slot = const_cast<TextureSlot*>(&loc.slot);
         result.resolved.u0 = u0; result.resolved.v0 = v0;
         result.resolved.u1 = u1; result.resolved.v1 = v1;
         result.resolved.width = loc.width;
@@ -2070,7 +2261,7 @@ private:
         info.origin = origin;
         info.isRenderTarget = isRenderTarget;
 
-        // 配置情報を登録
+        // 配置情報を登録 + slot 同期 (cmd 側が &loc.slot.handle を握ってる前提)
         {
             std::lock_guard locLock(locationMutex_);
             auto& loc = imageLocations_[id];
@@ -2078,6 +2269,11 @@ private:
             loc.width = w;
             loc.height = h;
             loc.isPending = false;
+            // ★ stable slot を実 handle で埋める。cmd が捕まえた &loc.slot.handle が
+            //   有効になる瞬間。size / fbo もここで同期 (Standalone は fbo INVALID)。
+            loc.slot.handle = handle;
+            loc.slot.size = { (int)w, (int)h };
+            loc.slot.fbo = info.fbo;
         }
 
         return true;
@@ -2371,6 +2567,7 @@ private:
         info.persistent = persistent;
         info.origin = ImageOrigin::Offscreen;
         info.isRenderTarget = true;
+        initFreshRenderTargetLayout(fbo, (uint16_t)w, (uint16_t)h);
 
         {
             std::lock_guard locLock(locationMutex_);
@@ -2487,6 +2684,11 @@ public:
     std::unordered_map<ImageId, ImageLocation> imageLocations_;
 
     std::atomic<uint64_t> nextFontAtlasImageId_{ 0x1000000 };
+
+    // 新規 lazy 確保したタイル/standalone FBO の Vulkan layout 初期化用 view 枠
+    // (= 上位から下に消費)。renderAllCommands は 0 から積み上げるので
+    // 224..255 を初期化専用に使う想定。
+    std::atomic<uint16_t> initViewCounter_{ 255 };
 };
 
 
@@ -2669,6 +2871,28 @@ public:
         // 配置タイプを事前登録（resolve()がGPUアップロード前でもルーティングできるように）
         auto placementType = decidePlacement(decoded.width, decoded.height, usage);
         master_.registerPendingWithType(imageId, placementType);
+
+        // ★ placement に応じて slot を GoThread で先に確保する (= 初回描画でも
+        //   cmd が掴むポインタアドレスを安定化させる)。bgfx は呼ばない:
+        //   ・Standalone: standaloneTextures_[id] + imageLocations_[id].slot を作る
+        //   ・GridAtlas:  gridAtlas_.acquire (page 0 は init 済みなので bgfx 不要)
+        //                + imageLocations_[id].slot.handle に page texture を代入
+        //   ・ShelfAtlas: 同上
+        //   ・FontAtlas:  glyph 単位なのでここでは扱わない (drawText 経路で別途処理)
+        if (placementType == ImageLocation::Type::Standalone) {
+            master_.reserveStandalonePlaceholder(imageId, decoded.width, decoded.height,
+                                                  usage, persistent);
+        }
+        else if (placementType == ImageLocation::Type::GridAtlas) {
+            uint64_t contentId = getImageIdLocal(imageId);
+            master_.reserveGridPlaceholder(imageId, contentId,
+                                            decoded.width, decoded.height);
+        }
+        else if (placementType == ImageLocation::Type::ShelfAtlas) {
+            uint64_t contentId = getImageIdLocal(imageId);
+            master_.reserveShelfPlaceholder(imageId, contentId,
+                                             decoded.width, decoded.height);
+        }
 
         // GPU にアップロード（レンダースレッドにキューイング）
         if (!uploadToGpu(imageId)) {
@@ -2929,6 +3153,15 @@ public:
     // Must be called from render thread (bgfx API calls require it)
     //=========================================================================
     void processGpuUploadsMainThread() {
+        // ★ Atlas page の bgfx::createTexture2D を先に走らせる (= GoThread が
+        //   reserveGridPlaceholder/reserveShelfPlaceholder で metadata-only な
+        //   page を作っていた場合、ここで初めて実 GPU テクスチャを生成する)。
+        //   この後の uploadToGpuInternal → registerGridImage で
+        //   loc.slot.handle に valid な page texture をコピーするため、
+        //   必ず ensure → register の順で。
+        master_.gridAtlas().ensureAllBgfxTextures();
+        master_.shelfAtlas().ensureAllBgfxTextures();
+
         std::vector<ImageId> toProcess;
         {
             std::lock_guard lock(gpuUploadQueueMutex_);

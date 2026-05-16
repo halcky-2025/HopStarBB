@@ -998,11 +998,60 @@ inline Generator _RunFileLoadCompletion(_AsyncFileLoad* res) {
 		s->pos   = 0;
 		s->owned = true;
 	}
+	SDL_Log("[LoadFile] complete: success=%d size=%zu s=%p",
+		(int)res->success, res->data.size(), (void*)s);
 	if (res->callback) (*res->callback)(res->thgc, s);
 	delete res->callback;
 	delete res;
 	co_return (char*)0;
 }
+
+#ifdef __ANDROID__
+#include <jni.h>
+#include <SDL3/SDL_system.h>
+
+// content:// / file:// URI から DISPLAY_NAME (= ファイル名) を取り出す。
+// 取得失敗時は空文字を返す。HopStarBBActivity.getDisplayNameForUri を JNI で呼ぶ。
+inline std::string androidDisplayNameForUri(const std::string& uri) {
+    if (uri.empty()) { SDL_Log("[Title] empty uri"); return {}; }
+    JNIEnv* env = (JNIEnv*)SDL_GetAndroidJNIEnv();
+    if (!env) { SDL_Log("[Title] SDL_GetAndroidJNIEnv returned NULL"); return {}; }
+    // ワーカースレッドの JNI では FindClass がアプリ class を見つけられないので、
+    // SDL の Activity 経由で GetObjectClass する (= activity の class loader を使う).
+    jobject activity = (jobject)SDL_GetAndroidActivity();
+    if (!activity) { SDL_Log("[Title] SDL_GetAndroidActivity returned NULL"); return {}; }
+    jclass cls = env->GetObjectClass(activity);
+    env->DeleteLocalRef(activity);
+    if (!cls) {
+        SDL_Log("[Title] GetObjectClass on activity failed");
+        env->ExceptionDescribe(); env->ExceptionClear();
+        return {};
+    }
+    jmethodID mid = env->GetStaticMethodID(cls, "getDisplayNameForUri",
+                                            "(Ljava/lang/String;)Ljava/lang/String;");
+    if (!mid) {
+        SDL_Log("[Title] GetStaticMethodID getDisplayNameForUri failed");
+        env->ExceptionDescribe(); env->ExceptionClear();
+        env->DeleteLocalRef(cls); return {};
+    }
+    jstring jUri = env->NewStringUTF(uri.c_str());
+    jstring jRes = (jstring)env->CallStaticObjectMethod(cls, mid, jUri);
+    env->DeleteLocalRef(jUri);
+    env->DeleteLocalRef(cls);
+    if (env->ExceptionCheck()) {
+        SDL_Log("[Title] CallStaticObjectMethod exception");
+        env->ExceptionDescribe(); env->ExceptionClear();
+        return {};
+    }
+    if (!jRes) { SDL_Log("[Title] Java returned null"); return {}; }
+    const char* c = env->GetStringUTFChars(jRes, nullptr);
+    std::string out = c ? std::string(c) : std::string();
+    SDL_Log("[Title] resolved=%s", out.c_str());
+    if (c) env->ReleaseStringUTFChars(jRes, c);
+    env->DeleteLocalRef(jRes);
+    return out;
+}
+#endif
 
 inline void LoadFileAsync(ThreadGC* thgc,
                           const std::string& path,

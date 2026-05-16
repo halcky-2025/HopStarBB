@@ -1,0 +1,65 @@
+plugins {
+     id 'com.android.application'
+}
+
+def buildWithCMake = project.hasProperty('BUILD_WITH_CMAKE');
+
+android {
+    namespace = "org.libsdl.app"
+    compileSdkVersion 35
+    ndkVersion = "27.3.13750724"
+    defaultConfig {
+        minSdkVersion 21
+        targetSdkVersion 35
+        versionCode 1
+        versionName "1.0"
+        externalNativeBuild {
+            ndkBuild {
+                arguments "APP_PLATFORM=android-21"
+                // abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
+                abiFilters 'arm64-v8a'
+            }
+            cmake {
+                // -DBX_CONFIG_DEBUG=0 で bgfx の ASSERT を無効化。
+                // Debug ビルドで bgfx の Vulkan ASSERT が走ると render thread が
+                // 止まってしまうため、APP コードのデバッグだけ可能にする。
+                arguments "-DANDROID_PLATFORM=android-21", "-DANDROID_STL=c++_static", "-DCMAKE_BUILD_TYPE=Debug", "-DBX_CONFIG_DEBUG=0"
+                // abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
+                abiFilters 'arm64-v8a'
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+    applicationVariants.all { variant ->
+        tasks["merge${variant.name.capitalize()}Assets"]
+            .dependsOn("externalNativeBuild${variant.name.capitalize()}")
+    }
+    if (!project.hasProperty('EXCLUDE_NATIVE_LIBS')) {
+        sourceSets.main {
+            jniLibs.srcDirs = ['libs', 'src/main/jniLibs']
+        }
+        externalNativeBuild {
+            cmake {
+                path 'jni/CMakeLists.txt'
+            }
+        }
+
+    }
+    lint {
+        abortOnError = false
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation 'androidx.core:core:1.12.0'
+}

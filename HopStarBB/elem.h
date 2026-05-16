@@ -160,16 +160,99 @@ struct FontId {
 	}
 };
 
+// 描画 cmd が握る「テクスチャ参照の最小単位」。
+// Standalone / Tile 等の placement 固有の info 構造体に **先頭メンバとして** 継承される。
+// cmd は TextureSlot* を捕まえれば、placement 種別に関係なく
+// handle / fbo / size を deref できる。アドレスは map slot ごとに stable
+// (= producer がエントリを作った瞬間から render thread が値を埋めるまでの間、
+//   ポインタ位置は不変。値だけが INVALID → valid に変化する)。
+struct TextureSlot {
+	bgfx::TextureHandle handle = BGFX_INVALID_HANDLE;
+	bgfx::FrameBufferHandle fbo = BGFX_INVALID_HANDLE;
+	PointI size = {0, 0};
+};
+
 struct ResolvedTexture {
-	bgfx::TextureHandle* texture = nullptr;
+	// TextureSlot* に統一 (= cmd は &slot->handle を捕まえる)。
+	// slot のアドレスは imageLocations_[id].slot / atlas page / tile 内
+	// に保持されているもので、entry erase されない限り stable。
+	TextureSlot* slot = nullptr;
 	float u0 = 0, v0 = 0, u1 = 1, v1 = 1;
 	uint16_t width = 0;
 	uint16_t height = 0;
 
-	bool isValid() const { return texture && bgfx::isValid(*texture); }
+	// 旧 API 互換: texture() で &slot->handle を返す。
+	// 旧 r.texture (field access) を呼んでた箇所は r.texture() (関数呼び出し) に
+	// 置き換える必要あり。新コードは r.slot->handle を直接見るのが推奨。
+	bgfx::TextureHandle* texture() const { return slot ? &slot->handle : nullptr; }
+
+	// isValid は「**slot がある = 描画 cmd に渡せる (= ポインタとして掴める)**」を意味する。
+	// slot->handle が現時点で INVALID でも true を返す: render thread が後で値を埋める
+	// 設計 (placeholder + lazy upload) のため。cmd は &slot->handle を保持して、
+	// 実描画時には valid handle になっている前提。
+	// 「今この瞬間に valid な bgfx texture か」を知りたい場合は
+	// `bgfx::isValid(slot->handle)` を直に見ること。
+	bool isValid() const { return slot != nullptr; }
 };
+// グローバル UI スケール (= SDL_GetWindowDisplayScale で取得した端末の論理→物理
+// 倍率)。Android 420dpi で 2.625 とか、Windows で 1.0、Win/Mac の Retina で 2.0
+// 等になる。main 起動直後にウィンドウ作成後に SetUiScale() で設定。
+// 0 以下は無効値扱いで 1.0 として扱う。
+inline float g_uiScale = 1.0f;
+inline void SetUiScale(float s) {
+	if (s > 0.0f) g_uiScale = s;
+}
+inline float GetUiScale() {
+#if defined(__ANDROID__) || (defined(TARGET_OS_IOS) && TARGET_OS_IOS) || (defined(TARGET_OS_SIMULATOR) && TARGET_OS_SIMULATOR)
+	// タッチ機器 (Android / iOS) は元 UI が 1200x800 デスクトップ前提で
+	// 作られていて DPI 拡大しないと指で押せない → 自動スケール。
+	return g_uiScale > 0.0f ? g_uiScale : 1.0f;
+#else
+	// Windows / Mac: 元 UI のピクセルサイズ感を維持したいので、
+	// OS 側の DPI scaling (125% / 150% / Retina) は UI 要素に
+	// 反映しない (= getFont の論理サイズもそのまま物理サイズ)。
+	// ユーザが「Windows でも自動スケール欲しい」と言ったら別 API で
+	// 強制有効化する。
+	return 1.0f;
+#endif
+}
+
+// 整数 / float の論理 dp → 物理 px 変換ヘルパ。
+// UI 要素のマージン/ボーダー/シャドウ/アイコン辺長などのリテラル値を
+//   margins = Sc(5);  /  radius = Sc(12);  /  iconSize = Sc(24);
+// と書けば、Android 高 DPI 端末や HiDPI Mac で自動的に物理ピクセルへ拡大される。
+// 切り捨てでなく四捨五入。最小 1px は保証。
+inline int   Sc (int v)   { int r = (int)((float)v * GetUiScale() + 0.5f); return r < 1 ? (v == 0 ? 0 : 1) : r; }
+inline float Scf(float v) { return v * GetUiScale(); }
+
+// タッチ操作向けの倍率付きヘルパ。マウスポインタは小さくても問題ないが、
+// 指タッチは Material design 推奨で 48dp 目安。
+//   Sctf(12)        : デフォルト 1.5x  → 描画用 (knob, border 等)
+//   Sctf(18, 2.0f)  : 明示 2.0x        → ヒット領域用 (見えてる範囲より少し外
+//                                        も拾わせて「指がずれてもタップ成立」)
+// デスクトップ (マウス) では mul 引数に関わらず 1.0x (touchScale なし)。
+inline bool IsTouchPlatform() {
+#if defined(__ANDROID__) || (defined(TARGET_OS_IOS) && TARGET_OS_IOS) || (defined(TARGET_OS_SIMULATOR) && TARGET_OS_SIMULATOR)
+	return true;
+#else
+	return false;
+#endif
+}
+inline float Sctf(float v, float touchMul = 1.5f) {
+	return v * GetUiScale() * (IsTouchPlatform() ? touchMul : 1.0f);
+}
+inline int   Sct (int v,   float touchMul = 1.5f) {
+	int r = (int)(Sctf((float)v, touchMul) + 0.5f);
+	return r < 1 ? (v == 0 ? 0 : 1) : r;
+}
+
+// フォントサイズは getFont 呼び出し時点でスケール適用。
+// 呼び出し側がリテラル (e.g., getFont("sans", 16)) を渡しても、
+// 高 DPI 端末では実物理サイズが拡大される。
 FontId getFont(const char* name, int size) {
-	FontId id(name, size);
+	int scaled = (int)((float)size * GetUiScale() + 0.5f);
+	if (scaled < 1) scaled = 1;
+	FontId id(name, scaled);
 	return id;
 }
 enum class ImageIdDomain : uint8_t {
@@ -252,10 +335,8 @@ enum class ImageUsage : uint8_t {
 	UIImage,        // UI画像 → Standalone or FontAtlas
 	Dynamic,        // 動的更新 → Standalone
 };
-struct StandaloneTextureInfo {
-	bgfx::TextureHandle handle = BGFX_INVALID_HANDLE;
-	bgfx::FrameBufferHandle fbo = BGFX_INVALID_HANDLE;
-	PointI size;
+struct StandaloneTextureInfo : TextureSlot {
+	// handle / fbo / size は TextureSlot から inherited
 	uint32_t refCount = 0;
 	uint64_t lastUsedFrame = 0;
 	bool persistent = false;
@@ -270,13 +351,15 @@ struct StandaloneTextureInfo {
 	// std::unordered_map<ImageId, StandaloneTextureInfo> の operator[]= 代入が必要)
 	StandaloneTextureInfo() = default;
 	StandaloneTextureInfo(const StandaloneTextureInfo& o)
-		: handle(o.handle), fbo(o.fbo), size(o.size), refCount(o.refCount),
+		: TextureSlot(o),  // handle / fbo / size を base class copy
+		  refCount(o.refCount),
 		  lastUsedFrame(o.lastUsedFrame), persistent(o.persistent),
 		  isRenderTarget(o.isRenderTarget), origin(o.origin),
 		  heldGen(o.heldGen.load(std::memory_order_relaxed)) {}
 	StandaloneTextureInfo& operator=(const StandaloneTextureInfo& o) {
 		if (this != &o) {
-			handle = o.handle; fbo = o.fbo; size = o.size; refCount = o.refCount;
+			TextureSlot::operator=(o);  // handle / fbo / size を base class assign
+			refCount = o.refCount;
 			lastUsedFrame = o.lastUsedFrame; persistent = o.persistent;
 			isRenderTarget = o.isRenderTarget; origin = o.origin;
 			heldGen.store(o.heldGen.load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -289,14 +372,12 @@ struct StandaloneTextureInfo {
 // TiledTextureInfo - 巨大テクスチャをタイル分割して管理
 //=============================================================================
 struct TiledTextureInfo {
-	struct Tile {
-		bgfx::TextureHandle handle = BGFX_INVALID_HANDLE;
-		bgfx::FrameBufferHandle fbo = BGFX_INVALID_HANDLE;  // オフスクリーン時のみ有効
+	struct Tile : TextureSlot {
+		// handle / fbo / size は TextureSlot から inherited
 		// タイルの開始位置（元画像座標系）。総寸法 > 65535 なら必ず uint16_t を超えるので int。
 		// 例: ugui.h で総高 67600 + maxTileSize 8192 → tilesY=9、最後のタイル y=65536。
 		int x = 0, y = 0;
 		uint16_t w = 0, h = 0;   // このタイルの実サイズ（端は小さくなる、maxTileSize_ ≤ 8192 で uint16 OK）
-		PointI size = {0, 0};    // {w, h} の PointI 版（fbsizeポインタ用）
 		// 世代カウンタ: tile ごとに「最新の中身が入っているか」を判定。
 		//   描画側 (Table 等) が visible tile だけ heldGen を更新する想定。
 		//   producer / render 両スレッドからアクセスするため atomic (x86 では追加コスト無し)。
@@ -307,14 +388,17 @@ struct TiledTextureInfo {
 		Tile() = default;
 		Tile(bgfx::TextureHandle h, bgfx::FrameBufferHandle f,
 		     int x_, int y_, uint16_t w_, uint16_t h_, PointI s)
-			: handle(h), fbo(f), x(x_), y(y_), w(w_), h(h_), size(s) {}
+			: x(x_), y(y_), w(w_), h(h_) {
+			handle = h; fbo = f; size = s;  // base class fields
+		}
 		Tile(const Tile& o)
-			: handle(o.handle), fbo(o.fbo), x(o.x), y(o.y), w(o.w), h(o.h),
-			  size(o.size), heldGen(o.heldGen.load(std::memory_order_relaxed)) {}
+			: TextureSlot(o),  // handle / fbo / size を base class copy
+			  x(o.x), y(o.y), w(o.w), h(o.h),
+			  heldGen(o.heldGen.load(std::memory_order_relaxed)) {}
 		Tile& operator=(const Tile& o) {
 			if (this != &o) {
-				handle = o.handle; fbo = o.fbo;
-				x = o.x; y = o.y; w = o.w; h = o.h; size = o.size;
+				TextureSlot::operator=(o);  // handle / fbo / size を base class assign
+				x = o.x; y = o.y; w = o.w; h = o.h;
 				heldGen.store(o.heldGen.load(std::memory_order_relaxed), std::memory_order_relaxed);
 			}
 			return *this;
@@ -446,6 +530,7 @@ ImageId queueOffscreenResize(ThreadGC* thgc, ImageId offscreenid, int width, int
 ImageId myloadTexture2D(ThreadGC* thgc, const char* path, ImageUsage usage);
 bgfx::TextureHandle* myResolveTexturePtr(ThreadGC* thgc, ImageId imageId);
 ResolvedTexture myResolveForDraw(ThreadGC* thgc, ImageId imageId);
+TextureSlot* myResolveSlot(ThreadGC* thgc, ImageId imageId);
 ExtendedRenderGroup& createGroup(ThreadGC* thgc);
 void drawTextUTF8(LayerInfo* layer, FontAtlas& atlas, FontId font,
 	const char* text, int length, float x, float y,

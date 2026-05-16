@@ -676,7 +676,9 @@ struct Offscreen : OffscreenEnd {
 	// source = nullptr (default) で従来挙動。
 	void markLayout(NewLocal* local, NewElement* source);
 	static void markLayoutChildren(NewLocal* local, Offscreen* off);
-	void markPaint(NewLocal* local);
+	// type: 自 offscreen に立てる PaintType。デフォルトは PaintOffscreen (= FBO 再生成)。
+	//   PaintCommand を渡せば「コマンド側だけ再生成」用途で使える。
+	void markPaint(NewLocal* local, PaintType type = PaintOffscreen);
 	static void markPaintChildren(Offscreen* parent);
 	uint64_t viewId = 0;  // 論理viewId
 	ExtendedRenderGroup *group;
@@ -2168,6 +2170,46 @@ void ElementDraw(ThreadGC* thgc, NewElement* elem, NewGraphic* g, NewLocal* loca
 	float sizex = elem->size.x + elem->paddings[1] + elem->paddings[3]; float sizey = elem->size.y + elem->paddings[0] + elem->paddings[2];
 	float viewSizex = sizex, viewSizey = sizey; // 要素の表示サイズ（バー描画用）
 	float tabExtL = 0, tabExtR = 0, tabExtT = 0, tabExtB = 0;
+
+	// スクロールバー / ページングバー描画。winFb に zIndex 10001 で書くだけなので、
+	// オフスクリーン処理 (blit / write / early-return) に左右されない位置で一回
+	// 走らせる。PaintOffscreen で early-return しても背景バーは毎フレーム描かれる。
+	if (g->winFb) {
+		PointF absPos2 = getAbsolutePosition(elem);
+		if (baseType(elem->ytype) == SizeType::Scroll) {
+			drawRightScrollBar(g->layer,
+				absPos2.x + viewSizex - sbarx * 3 / 2, absPos2.y, sbarx, viewSizey - sbary, sbarx * 3 / 2,
+				elem->scroll.y, viewSizey, elem->size2.y,
+				10001.0f,
+				g->winFb, g->winFbsize, g->winViewId);
+		}
+		if (baseType(elem->xtype) == SizeType::Scroll) {
+			drawUnderScrollBar(g->layer,
+				absPos2.x, absPos2.y + viewSizey - sbary * 3 / 2, viewSizex - sbarx, sbary, sbary * 3 / 2,
+				elem->scroll.x, viewSizex, elem->size2.x,
+				10001.0f,
+				g->winFb, g->winFbsize, g->winViewId);
+		}
+		if (baseType(elem->ytype) == SizeType::Page) {
+			float totalPages = std::ceil(elem->size2.y / viewSizey);
+			float currentPage = std::floor(elem->scroll.y / viewSizey);
+			drawRightPagingBar(g->layer, *getAtlas(thgc), getFont("sans", 16),
+				absPos2.x + viewSizex - sbarx, absPos2.y, sbarx, viewSizey - sbary,
+				currentPage, totalPages,
+				10001.0f, g->group,
+				g->winFb, g->winFbsize, g->winViewId);
+		}
+		if (baseType(elem->xtype) == SizeType::Page) {
+			float totalPages = std::ceil(elem->size2.x / viewSizex);
+			float currentPage = std::floor(elem->scroll.x / viewSizex);
+			drawUnderPagingBar(g->layer, *getAtlas(thgc), getFont("sans", 16),
+				absPos2.x, absPos2.y + viewSizey - sbary, viewSizex - sbarx, sbary,
+				currentPage, totalPages,
+				10001.0f, g->group,
+				g->winFb, g->winFbsize, g->winViewId);
+		}
+	}
+
 	if (elem->offscreen != NULL) {
 		if (elem->background) {
 			float tabR = elem->background->backUVMinX;
@@ -2224,8 +2266,8 @@ void ElementDraw(ThreadGC* thgc, NewElement* elem, NewGraphic* g, NewLocal* loca
 			elem->offscreen->imPing = queueOffscreenResize(thgc, elem->offscreen->imPing, size3x, size3y, pageW, pageH);
 			elem->offscreen->imPong = queueOffscreenResize(thgc, elem->offscreen->imPong, size3x, size3y, pageW, pageH);
 		}
-		ImageId readId = elem->offscreen->ping ? elem->offscreen->imPing : elem->offscreen->imPong;
-		ImageId writeId = elem->offscreen->ping ? elem->offscreen->imPong : elem->offscreen->imPing;
+		ImageId readId = elem->offscreen->imPing;
+		ImageId writeId = elem->offscreen->imPing;
 
 		// タイルFBOか通常FBOかで分岐
 		TiledTextureInfo* tiledRead = mygetTiledTextureInfo(thgc, readId);
@@ -2404,6 +2446,7 @@ void ElementDraw(ThreadGC* thgc, NewElement* elem, NewGraphic* g, NewLocal* loca
 					texSlots[1], texSlots[2], texSlots[3]);
 			}
 			if (g->paint == Offscreen::PaintOffscreen) return;
+			elem->offscreen->paint = Offscreen::PaintOffscreen;
 			// 書き込み: LayerInfoにタイル状態を設定し、push関数が自動的にタイル展開する
 			TiledTextureInfo* tiledWrite = mygetTiledTextureInfo(thgc, writeId);
 			if (tiledWrite && !tiledWrite->tiles.empty()) {
@@ -2489,12 +2532,17 @@ void ElementDraw(ThreadGC* thgc, NewElement* elem, NewGraphic* g, NewLocal* loca
 					bg ? bg->bs.borderColor : 0,
 					bg ? bg->bs.shadowX : 0, bg ? bg->bs.shadowY : 0, bg ? bg->bs.shadowBlur : 0,
 					bg ? bg->bs.shadowColor : 0, 0xFFFFFFFF,
-					10000 + std::floor(z), &readInfo->handle, g->fb, g->fbsize, g->viewId,
+					// graphic.zIndex を加算 (= popup を Android で main UI より上に乗せるための
+					// オーバーレイ用 base zIndex を効かせる)。通常 (zIndex=0) のときは挙動不変。
+					10000 + std::floor(z) + g->zIndex, &readInfo->handle, g->fb, g->fbsize, g->viewId,
 					0.0f,
 					bg ? bg->cornerPattern : 0.0f,
 					bg ? bg->backUVMinX : 0.0f);
 			}
-			if (g->paint == Offscreen::PaintOffscreen) return;
+			if (g->paint == Offscreen::PaintOffscreen) {
+				return;
+			}
+			elem->offscreen->paint = Offscreen::PaintOffscreen;
 			auto writeInfo = mygetStandaloneTextureInfo(thgc, writeId);
 			uint64_t offscreenViewId = ::viewId++;
 			g2 = NewGraphic{g->layer, elem, elem, {tabExtL, tabExtT}, {elem->size2.x + tabExtL + tabExtR, elem->size2.y + tabExtT + tabExtB}, {0,0}, {0,0},
@@ -2514,24 +2562,28 @@ void ElementDraw(ThreadGC* thgc, NewElement* elem, NewGraphic* g, NewLocal* loca
 	g2.start = g->pos;
 	if (elem->background != NULL) {
 		bgfx::TextureHandle* tex1, * tex2, * tex3, * tex4;
+		// resolveSlot は全 placement (Standalone / Grid / Shelf) 共通で
+		// &imageLocations_[id].slot.handle の stable アドレスを返す。
+		// loadSync が GoThread 側で slot を事前確保しているので、初回描画でも
+		// 有効なポインタが取れる (値は INVALID → render thread 上書き)。
 		if (isValidImageId(elem->background->tex1)) {
-			auto info = mygetStandaloneTextureInfo(thgc, elem->background->tex1);
-			tex1 = &info->handle;
+			auto* slot = myResolveSlot(thgc, elem->background->tex1);
+			tex1 = slot ? &slot->handle : &nulltex;
 		}
 		else tex1 = &nulltex;
 		if (isValidImageId(elem->background->tex2)) {
-			auto info = mygetStandaloneTextureInfo(thgc, elem->background->tex2);
-			tex2 = &info->handle;
+			auto* slot = myResolveSlot(thgc, elem->background->tex2);
+			tex2 = slot ? &slot->handle : &nulltex;
 		}
 		else tex2 = &nulltex;
 		if (isValidImageId(elem->background->tex3)) {
-			auto info = mygetStandaloneTextureInfo(thgc, elem->background->tex3);
-			tex3 = &info->handle;
+			auto* slot = myResolveSlot(thgc, elem->background->tex3);
+			tex3 = slot ? &slot->handle : &nulltex;
 		}
 		else tex3 = &nulltex;
 		if (isValidImageId(elem->background->tex4)) {
-			auto info = mygetStandaloneTextureInfo(thgc, elem->background->tex4);
-			tex4 = &info->handle;
+			auto* slot = myResolveSlot(thgc, elem->background->tex4);
+			tex4 = slot ? &slot->handle : &nulltex;
 		}
 		else tex4 = &nulltex;
 		bool hasOffscreen = elem->offscreen != NULL;
@@ -2563,42 +2615,8 @@ void ElementDraw(ThreadGC* thgc, NewElement* elem, NewGraphic* g, NewLocal* loca
 		child->Draw(child->gc, child, &g2, child->gc->local, q);
 		child = child->next;
 	}
-	// スクロールバー / ページングバー描画 (ウィンドウFBOに絶対座標で直接描画)
-	if (g2.winFb) {
-		PointF absPos2 = getAbsolutePosition(elem);
-		if (baseType(elem->ytype) == SizeType::Scroll) {
-			drawRightScrollBar(g2.layer,
-				absPos2.x + viewSizex - sbarx * 3 / 2, absPos2.y, sbarx, viewSizey - sbary, sbarx * 3 / 2,
-				elem->scroll.y, viewSizey, elem->size2.y,
-				10001.0f,
-				g2.winFb, g2.winFbsize, g2.winViewId);
-		}
-		if (baseType(elem->xtype) == SizeType::Scroll) {
-			drawUnderScrollBar(g2.layer,
-				absPos2.x, absPos2.y + viewSizey - sbary * 3 / 2, viewSizex - sbarx, sbary, sbary * 3 / 2,
-				elem->scroll.x, viewSizex, elem->size2.x,
-				10001.0f,
-				g2.winFb, g2.winFbsize, g2.winViewId);
-		}
-		if (baseType(elem->ytype) == SizeType::Page) {
-			float totalPages = std::ceil(elem->size2.y / viewSizey);
-			float currentPage = std::floor(elem->scroll.y / viewSizey);
-			drawRightPagingBar(g2.layer, *getAtlas(thgc), getFont("sans", 16),
-				absPos2.x + viewSizex - sbarx, absPos2.y, sbarx, viewSizey - sbary,
-				currentPage, totalPages,
-				10001.0f, g2.group,
-				g2.winFb, g2.winFbsize, g2.winViewId);
-		}
-		if (baseType(elem->xtype) == SizeType::Page) {
-			float totalPages = std::ceil(elem->size2.x / viewSizex);
-			float currentPage = std::floor(elem->scroll.x / viewSizex);
-			drawUnderPagingBar(g2.layer, *getAtlas(thgc), getFont("sans", 16),
-				absPos2.x, absPos2.y + viewSizey - sbary, viewSizex - sbarx, sbary,
-				currentPage, totalPages,
-				10001.0f, g2.group,
-				g2.winFb, g2.winFbsize, g2.winViewId);
-		}
-	}
+	// スクロールバー描画は ↑ オフスクリーン処理の前に移動済み。
+	// PaintOffscreen で early-return しても毎フレーム描かれる。
 
 	// タイル描画状態を親の値で復元 (nullptr で潰すと外側のタイル展開が壊れる)
 	g->layer->tiledTarget         = _saveTiledTarget;
@@ -2620,8 +2638,16 @@ void initLocal(ThreadGC* thgc, NewLocal* local, NativeWindow* mainWindow = nullp
 	local->pos.x = local->pos.y = 0;
 	local->offscreen = new Offscreen();
 	local->scroll.x = local->scroll.y = 0;
-	local->size.x = 1200;
-	local->size.y = 800;
+	// Use the bound NativeWindow's actual size if available, so the layout
+	// fills the full window (especially Android phone screens). Fallback to
+	// the desktop default 1200x800 when no window is provided.
+	if (mainWindow && mainWindow->size.x > 0 && mainWindow->size.y > 0) {
+		local->size.x = mainWindow->size.x;
+		local->size.y = mainWindow->size.y;
+	} else {
+		local->size.x = 1200;
+		local->size.y = 800;
+	}
 	local->size2.x = local->size2.y = 0;
 	local->xtype = local->ytype = SizeType::Scroll;
 	local->position = Relative;
@@ -3476,10 +3502,10 @@ int LineMouse(ThreadGC* thgc, NewElement* self, MouseEvent* e, PointF pos, NewLo
 			if (elem->type == _Sidelet && elem->background) {
 				int dir = (int)(elem->background->cornerPattern - 9.0f);
 				switch (dir) {
-				case 0: hitT = 18; break;
-				case 1: hitR = 18; break;
-				case 2: hitB = 18; break;
-				case 3: hitL = 18; break;
+				case 0: hitT = Sctf(18, 2.0f); break;
+				case 1: hitR = Sctf(18, 2.0f); break;
+				case 2: hitB = Sctf(18, 2.0f); break;
+				case 3: hitL = Sctf(18, 2.0f); break;
 				}
 			}
 			if (par) {
@@ -3733,11 +3759,14 @@ int ElementMouse(ThreadGC* thgc, NewElement* self, MouseEvent* e, PointF pos, Ne
 			float hitL = 0, hitR = 0, hitT = 0, hitB = 0;
 			if (elem->type == _Sidelet && elem->background) {
 				Sidelet* sidelet = (Sidelet*)elem;
+				// Sctf を当てる: 視覚的なつまみ(backUVMinX が Sctf 化されている)
+				// と親側の hit 拡張がスケール一致しないと、画面上は触れているのに
+				// 親 hit test ではじかれる現象が発生する。
 				switch (sidelet->direction) {
-				case 0: hitT = 18; break;
-				case 1: hitR = 18; break;
-				case 2: hitB = 18; break;
-				case 3: hitL = 18; break;
+				case 0: hitT = Sctf(18, 2.0f); break;
+				case 1: hitR = Sctf(18, 2.0f); break;
+				case 2: hitB = Sctf(18, 2.0f); break;
+				case 3: hitL = Sctf(18, 2.0f); break;
 				}
 			}
 			if (self->orient) {
@@ -4938,7 +4967,14 @@ void myDestroyPopupWindow(ThreadGC* thgc, NativeWindow* popup);
 #include "othelem.h"
 
 
+// HopStar の invalidate を 1 にする。HopStar は ugui.h で完全定義されるが、
+// このファイルではまだ前方宣言止まりなので、ヘルパは ugui.h 側で実装する。
+void markHopStarInvalidate(ThreadGC* gc);
+
 inline void Offscreen::markLayout(NewLocal* local, NewElement* source) {
+	// 描画ループに「次フレームで再 build せよ」と通知。invalidate=0 のままだと
+	// buildFrame は measure / paint を skip するので、ここで必ず 1 にする。
+	markHopStarInvalidate(local->gc);
 	// 「offscreen の elem が Table」のとき、descendant から親を辿って Table 直下の cell を見つけて
 	// dirtyCells に登録するヘルパ。
 	auto registerCellIfTable = [&](Offscreen* off, NewElement* descendant) {
@@ -4980,28 +5016,17 @@ inline void Offscreen::markLayoutChildren(NewLocal* local, Offscreen* off) {
 		}
 	}
 }
-inline void Offscreen::markPaint(NewLocal* local) {
+inline void Offscreen::markPaint(NewLocal* local, Offscreen::PaintType type) {
+	// 描画ループに「次フレームで再 build せよ」と通知 (= markLayout と同様)。
+	markHopStarInvalidate(local->gc);
 	if (elem->type == LetterType::_Linked) {
 		LinkedElement* linked = (LinkedElement*)elem;
-		markPaint(linked->page->gc->local);
+		linked->page->offscreen->markPaint(linked->page->gc->local, type);
 	}
 	else {
-		paint = PaintCommand;
-		updateGen++;
+		// 既に強い paint 指定が立っているなら降格させない (= max を取る)。
+		if (paint < type) paint = type;
+		if (type == Offscreen::PaintCommand) updateGen++;
 		local->dirty = (DirtyType)(local->dirty | DirtyType::Partial);
-		markPaintChildren(this);
-	}
-}
-inline void Offscreen::markPaintChildren(Offscreen* parent) {
-	if (parent->elem->type == LetterType::_Linked) {
-		LinkedElement* linked = (LinkedElement*)parent->elem;
-		markPaintChildren(linked->page->offscreen);
-	}
-	else if (parent->child) {
-		for (Offscreen* c = parent->child->next; c->type != OffscreenType::EndOff; c = c->next) {
-			if (c->paint < PaintOffscreen) c->paint = PaintOffscreen;
-			c->updateGen++;
-			markPaintChildren(c);
-		}
 	}
 }

@@ -5,6 +5,7 @@ namespace coro = std;
 #include <coro/coro.hpp>
 #endif
 
+#include <SDL3/SDL_log.h>
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -93,10 +94,15 @@ public:
         CoroutineQueue* queue = nullptr;
         char* blockobj;
         std::coroutine_handle<Generator::promise_type> parent;
-        int state;
-        char* current_value;
-        char* ret_value;
-        int statefin;
+        // ★ state は必ず 0 で開始すること: -1 は final_suspend 完了マーカー (resume_all
+        //   が skip 対象とする) のため、デフォルト未初期化だと前回 freed されたフレーム
+        //   メモリが同アドレスで再アロケートされた時に「いきなり state==-1 で開始」
+        //   する可能性がある。実際 Android で coroutine frame allocator が同アドレスを
+        //   返してきて 2 個目以降の inner coroutine が resume されない bug を踏んだ。
+        int state = 0;
+        char* current_value = nullptr;
+        char* ret_value = nullptr;
+        int statefin = -1;
 		std::suspend_always yield_value(char* val);
 
         void return_value(char* val) {

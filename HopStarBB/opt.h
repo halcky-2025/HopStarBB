@@ -1,3 +1,11 @@
+// =============================================================================
+// opt.h - カメラ取込 + PyTorch 推論 (Windows 限定)
+// FFmpeg + DirectShow (dshow) + LibTorch を使用するため当面 Windows 専用。
+// Android では dshow の代わりに Camera2 API、PyTorch の代わりに ONNX Runtime
+// などで再構築する想定。今は丸ごとガード。
+// =============================================================================
+#ifdef _WIN32
+
 AVFormatContext* formatContext = NULL;
 const AVInputFormat* input_format;
 AVDeviceInfoList* device_list = NULL;
@@ -157,3 +165,5 @@ struct NuroPlan {
     torch::Tensor output() {
     }
 };
+
+#endif // _WIN32

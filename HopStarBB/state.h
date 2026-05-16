@@ -14,6 +14,8 @@
 // ============================================================
 
 #include "db2.h"
+#include <SDL3/SDL_log.h>
+#include "sqlite3.h"
 #include <string>
 #include <vector>
 #include <tuple>
@@ -23,6 +25,8 @@ namespace state {
 
 // プロセス内の唯一の SqlPool (= state.db を 1 worker で開く)。
 inline SqlPool* g_pool = nullptr;
+// state.db のパスを覚えておいて replay() で再利用する。
+inline std::string g_dbPath;
 
 // ----------------------------------------------------------------
 // 内部: 任意の Generator を thgc->queue に投入して非同期実行を始める
@@ -38,29 +42,50 @@ inline void _spawn(ThreadGC* thgc, Generator g) {
 // ----------------------------------------------------------------
 // 初期化: SqlPool 作成 → schema を非同期で投入
 // ----------------------------------------------------------------
-inline Generator _initSchema(ThreadGC* thgc, SqlPool* pool, CoroutineQueue* queue) {
-	auto tx = (Transaction*)co_await begin_tx(thgc, pool, queue);
-	co_await execf(tx,
+// schema creation: SqlPool より前に sqlite3_exec で直接行う。
+// coroutine 経由で CREATE TABLE を流す方式は Android で resume が
+// 戻ってこない症状を踏んだので回避。schema は冪等 (IF NOT EXISTS) で
+// あれば毎回回しても無害。
+inline void _createSchema(const char* dbPath) {
+	sqlite3* db = nullptr;
+	if (sqlite3_open_v2(dbPath, &db,
+		SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) != SQLITE_OK)
+	{
+		SDL_Log("[state] _createSchema: open failed: %s",
+			db ? sqlite3_errmsg(db) : "(null)");
+		if (db) sqlite3_close_v2(db);
+		return;
+	}
+	const char* ddl =
 		"CREATE TABLE IF NOT EXISTS opened_files("
 		" path TEXT PRIMARY KEY,"
 		" opened_at INTEGER"
-		");", {}, NULL, NULL);
-	co_await execf(tx,
+		");"
 		"CREATE TABLE IF NOT EXISTS breakpoints("
 		" file TEXT NOT NULL,"
 		" line INTEGER NOT NULL,"
 		" enabled INTEGER NOT NULL,"
 		" PRIMARY KEY(file, line)"
-		");", {}, NULL, NULL);
-	co_await tx->commit();
-	co_return (char*)0;
+		");";
+	char* errmsg = nullptr;
+	if (sqlite3_exec(db, ddl, nullptr, nullptr, &errmsg) != SQLITE_OK) {
+		SDL_Log("[state] _createSchema: exec failed: %s", errmsg ? errmsg : "(null)");
+		if (errmsg) sqlite3_free(errmsg);
+	} else {
+		SDL_Log("[state] _createSchema: done");
+	}
+	sqlite3_close_v2(db);
 }
 
 inline void init(ThreadGC* thgc, const char* dbPath) {
 	if (g_pool) return;
+	// schema 作成は同期で済ませる (= worker thread / coroutine を介さない)。
+	// 起動 1 回限り & IF NOT EXISTS なので冪等。SqlPool 立ち上げ前に DB の
+	// 形を整えておく方が、後段の async access が単純になる。
+	_createSchema(dbPath);
+	g_dbPath = dbPath;
 	g_pool = new SqlPool(std::string(dbPath), 1);   // worker 1 つで十分
-	_spawn(thgc, _initSchema(thgc, g_pool, thgc->queue));
-	fprintf(stderr, "[state] init: %s\n", dbPath);
+	SDL_Log("[state] init: %s", dbPath);
 }
 
 // ----------------------------------------------------------------
@@ -83,7 +108,8 @@ inline Generator _recordOpen(ThreadGC* thgc, SqlPool* pool, CoroutineQueue* queu
 }
 
 inline void record_open(ThreadGC* thgc, const std::string& path) {
-	if (!g_pool) return;
+	if (!g_pool) { SDL_Log("[state] record_open: g_pool=null, skip path=%s", path.c_str()); return; }
+	SDL_Log("[state] record_open: path=%s", path.c_str());
 	_spawn(thgc, _recordOpen(thgc, g_pool, thgc->queue, path));
 }
 
@@ -203,6 +229,7 @@ inline Generator _replay(ThreadGC* thgc, SqlPool* pool, CoroutineQueue* queue,
 		"SELECT file, line, enabled FROM breakpoints",
 		{}, _setBpRow, (char*)buf);
 	co_await tx->commit();
+	SDL_Log("[state] replay: files=%zu bps=%zu", buf->files.size(), buf->bps.size());
 
 	// === BP 復元 (= 軽い、LLDBClient.breakpoints に追加するだけ) ===
 	if (bpCb) {
@@ -216,6 +243,7 @@ inline Generator _replay(ThreadGC* thgc, SqlPool* pool, CoroutineQueue* queue,
 	// queueOffscreenResize / tile 作成が立て込んで描画が乱れる。
 	if (openCb) {
 		for (auto& f : buf->files) {
+			SDL_Log("[state] replay open: %s", f.c_str());
 			openCb(thgc, f.c_str());
 			co_yield nullptr;   // ← UI フレーム送り。次の resume_all まで待機。
 		}

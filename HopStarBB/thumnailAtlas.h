@@ -147,23 +147,10 @@ public:
 
         uint8_t maxMip = static_cast<uint8_t>(std::log2(m_config.contentSize)) + 1;
         m_config.maxMipLevels = std::min(m_config.maxMipLevels, maxMip);
-    }
 
-    ~ThumbnailGridPage() { shutdown(); }
-
-    ThumbnailGridPage(const ThumbnailGridPage&) = delete;
-    ThumbnailGridPage& operator=(const ThumbnailGridPage&) = delete;
-
-    bool initialize() {
-        if (bgfx::isValid(m_texture)) return true;
-
-        uint64_t flags = BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP;
-        m_texture = bgfx::createTexture2D(
-            m_config.atlasWidth, m_config.atlasHeight,
-            m_config.maxMipLevels > 1, 1, m_config.format, flags, nullptr);
-
-        if (!bgfx::isValid(m_texture)) return false;
-
+        // ★ メタデータ (rects / freeList) はコンストラクタで確保 — bgfx 呼ばないので
+        //    GoThread / main thread から page を作るのも安全。
+        //    bgfx::createTexture2D は initialize() (render thread) で後から呼ぶ。
         uint32_t total = m_tilesX * m_tilesY;
         m_rects.resize(total);
         m_freeList.reserve(total);
@@ -175,9 +162,28 @@ public:
             m_rects[i].y = (i / m_tilesX) * m_config.tileSize + padding;
             m_freeList.push_back(total - 1 - i);
         }
-
-        return true;
     }
+
+    ~ThumbnailGridPage() { shutdown(); }
+
+    ThumbnailGridPage(const ThumbnailGridPage&) = delete;
+    ThumbnailGridPage& operator=(const ThumbnailGridPage&) = delete;
+
+    // ★ bgfx::createTexture2D を呼ぶ部分のみ。**render thread 専用**。
+    // metadata は既にコンストラクタで確保済みなのでここでは bgfx だけ。
+    bool initialize() {
+        if (bgfx::isValid(m_texture)) return true;
+
+        uint64_t flags = BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP;
+        m_texture = bgfx::createTexture2D(
+            m_config.atlasWidth, m_config.atlasHeight,
+            m_config.maxMipLevels > 1, 1, m_config.format, flags, nullptr);
+
+        return bgfx::isValid(m_texture);
+    }
+
+    // bgfx texture が未生成かどうか (render thread が ensure 系で呼ぶ用)
+    bool needsBgfxInit() const { return !bgfx::isValid(m_texture); }
 
     void shutdown() {
         if (bgfx::isValid(m_texture)) {
@@ -546,6 +552,16 @@ public:
         return true;
     }
 
+    // state チェック無しの UV 取得 (= acquire 直後 state==Loading でも UV を返す)。
+    // 位置 (r.x/r.y) は allocate 時に確定済みなので、upload 未完でも UV は計算可能。
+    // placeholder 段階の cmd 描画で wrong UV (= 全表示 0..1) を避けるのに使う。
+    bool computeUVAnyState(ThumbnailHandle handle, float& u0, float& v0, float& u1, float& v1) const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (handle.pageIndex >= m_pages.size()) return false;
+        m_pages[handle.pageIndex]->computeUV(handle.rectIndex, u0, v0, u1, v1);
+        return true;
+    }
+
     void getPlaceholderUV(float& u0, float& v0, float& u1, float& v1) const {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!m_pages.empty()) {
@@ -618,13 +634,23 @@ private:
         pageConfig.loadingTimeoutFrames = m_config.loadingTimeoutFrames;
         pageConfig.format = m_config.format;
 
+        // page のメタデータだけ作る (bgfx は呼ばない → GoThread からの呼び出し安全)。
+        // 実 bgfx テクスチャは ensureAllBgfxTextures() で render thread が後から init する。
         auto page = std::make_unique<ThumbnailGridPage>((uint16_t)m_pages.size(), pageConfig);
-        if (!page->initialize()) return nullptr;
-
         ThumbnailGridPage* ptr = page.get();
         m_pages.push_back(std::move(page));
         return ptr;
     }
+
+public:
+    // render thread から呼ぶ。未 init の page 全てに bgfx texture を生成する。
+    void ensureAllBgfxTextures() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (auto& page : m_pages) {
+            if (page->needsBgfxInit()) page->initialize();
+        }
+    }
+private:
 
     void processUpload(PendingUpload& upload) {
         uint16_t x, y;
@@ -716,6 +742,11 @@ public:
 
         uint8_t maxMip = static_cast<uint8_t>(std::log2(m_config.contentHeight)) + 1;
         m_config.maxMipLevels = std::min(m_config.maxMipLevels, maxMip);
+
+        // ★ メタデータをコンストラクタで確保 (bgfx 不要、GoThread 安全)。
+        // bgfx::createTexture2D は initialize() で後から (render thread).
+        m_rects.reserve(256);
+        m_shelves.reserve(m_maxShelves);
     }
 
     ~ThumbnailShelfPage() { shutdown(); }
@@ -723,6 +754,7 @@ public:
     ThumbnailShelfPage(const ThumbnailShelfPage&) = delete;
     ThumbnailShelfPage& operator=(const ThumbnailShelfPage&) = delete;
 
+    // ★ bgfx::createTexture2D 部分のみ。render thread 専用。
     bool initialize() {
         if (bgfx::isValid(m_texture)) return true;
 
@@ -731,13 +763,10 @@ public:
             m_config.atlasWidth, m_config.atlasHeight,
             m_config.maxMipLevels > 1, 1, m_config.format, flags, nullptr);
 
-        if (!bgfx::isValid(m_texture)) return false;
-
-        m_rects.reserve(256);
-        m_shelves.reserve(m_maxShelves);
-
-        return true;
+        return bgfx::isValid(m_texture);
     }
+
+    bool needsBgfxInit() const { return !bgfx::isValid(m_texture); }
 
     void shutdown() {
         if (bgfx::isValid(m_texture)) {
@@ -1245,6 +1274,16 @@ public:
         return true;
     }
 
+    // state チェック無しの UV 取得 (= acquire 直後 state==Loading でも UV を返す)。
+    // 位置 (r.x/r.y) は allocate 時に確定済みなので、upload 未完でも UV は計算可能。
+    // placeholder 段階の cmd 描画で wrong UV (= 全表示 0..1) を避けるのに使う。
+    bool computeUVAnyState(ThumbnailHandle handle, float& u0, float& v0, float& u1, float& v1) const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (handle.pageIndex >= m_pages.size()) return false;
+        m_pages[handle.pageIndex]->computeUV(handle.rectIndex, u0, v0, u1, v1);
+        return true;
+    }
+
     void getPlaceholderUV(float& u0, float& v0, float& u1, float& v1) const {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!m_pages.empty()) {
@@ -1307,6 +1346,14 @@ public:
     uint16_t contentHeight() const { return m_config.contentHeight; }
     uint16_t maxContentWidth() const { return m_config.maxContentWidth; }
 
+public:
+    // render thread から呼ぶ。未 init の page 全てに bgfx texture を生成する。
+    void ensureAllBgfxTextures() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (auto& page : m_pages) {
+            if (page->needsBgfxInit()) page->initialize();
+        }
+    }
 private:
     ThumbnailShelfPage* createNewPage() {
         ShelfPageConfig pageConfig;
@@ -1319,9 +1366,9 @@ private:
         pageConfig.loadingTimeoutFrames = m_config.loadingTimeoutFrames;
         pageConfig.format = m_config.format;
 
+        // page metadata だけ作る (bgfx 不要、GoThread 安全)。
+        // 実 bgfx テクスチャは ensureAllBgfxTextures() で render thread が後で init.
         auto page = std::make_unique<ThumbnailShelfPage>((uint16_t)m_pages.size(), pageConfig);
-        if (!page->initialize()) return nullptr;
-
         ThumbnailShelfPage* ptr = page.get();
         m_pages.push_back(std::move(page));
         return ptr;
@@ -1495,28 +1542,35 @@ class FontAtlasPage {
 public:
     struct Shelf { int x, y, h; };
 
+    // ★ 共通の stable storage。ResolvedTexture が `slot` を指すことで font glyph も
+    //   Standalone / Grid / Shelf と統一して扱える (= cmd は &slot.handle を捕まえる)。
+    TextureSlot slot;
+
     FontAtlasPage(int w, int h, int padding, uint16_t index, AtlasAffinity affinity)
         : W_(w), H_(h), pad_(padding), pageIndex_(index), affinity_(affinity)
     {
         pixels_.resize((size_t)W_ * H_ * 4, 0);
         shelves_.push_back({ 0, 0, 0 });
-        tex_ = bgfx::createTexture2D(
+        slot.handle = bgfx::createTexture2D(
             (uint16_t)W_, (uint16_t)H_, false, 1,
             bgfx::TextureFormat::RGBA8,
             BGFX_TEXTURE_NONE | BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP,
             nullptr);
+        slot.size = { W_, H_ };
     }
     ~FontAtlasPage() {
-        if (bgfx::isValid(tex_)) bgfx::destroy(tex_);
+        if (bgfx::isValid(slot.handle)) bgfx::destroy(slot.handle);
     }
 
     FontAtlasPage(FontAtlasPage&& o) noexcept
-        : W_(o.W_), H_(o.H_), pad_(o.pad_), pageIndex_(o.pageIndex_),
+        : slot(o.slot),
+        W_(o.W_), H_(o.H_), pad_(o.pad_), pageIndex_(o.pageIndex_),
         affinity_(o.affinity_), pixels_(std::move(o.pixels_)),
-        shelves_(std::move(o.shelves_)), tex_(o.tex_),
+        shelves_(std::move(o.shelves_)),
         stats_(o.stats_), pendingUploads_(std::move(o.pendingUploads_))
     {
-        o.tex_ = BGFX_INVALID_HANDLE;
+        o.slot.handle = BGFX_INVALID_HANDLE;
+        o.slot.fbo    = BGFX_INVALID_HANDLE;
     }
 
     FontAtlasPage(const FontAtlasPage&) = delete;
@@ -1524,7 +1578,7 @@ public:
     FontAtlasPage& operator=(FontAtlasPage&&) = delete;
 
     // �A�N�Z�T�i�ǂݎ���p�j
-    bgfx::TextureHandle& handle() { return tex_; }
+    bgfx::TextureHandle& handle() { return slot.handle; }
     uint16_t pageIndex() const { return pageIndex_; }
     AtlasAffinity affinity() const { return affinity_; }
     const AtlasPageStats& stats() const { return stats_; }
@@ -1630,7 +1684,7 @@ public:
                 s + (size_t)row * pitch, (size_t)w * 4);
         }
         const bgfx::Memory* mem = bgfx::copy(staging.data(), (uint32_t)staging.size());
-        bgfx::updateTexture2D(tex_, 0, 0, (uint16_t)x, (uint16_t)y,
+        bgfx::updateTexture2D(slot.handle, 0, 0, (uint16_t)x, (uint16_t)y,
             (uint16_t)w, (uint16_t)h, mem);
     }
 
@@ -1642,7 +1696,7 @@ public:
                 (size_t)gi.width * 4);
         }
         const bgfx::Memory* mem = bgfx::copy(data.data(), (uint32_t)data.size());
-        bgfx::updateTexture2D(tex_, 0, 0, (uint16_t)gi.atlasX, (uint16_t)gi.atlasY,
+        bgfx::updateTexture2D(slot.handle, 0, 0, (uint16_t)gi.atlasX, (uint16_t)gi.atlasY,
             (uint16_t)gi.width, (uint16_t)gi.height, mem);
     }
 
@@ -1651,7 +1705,7 @@ public:
     AtlasAffinity affinity_;
     std::vector<uint8_t> pixels_;
     std::vector<Shelf> shelves_;
-    bgfx::TextureHandle tex_{ BGFX_INVALID_HANDLE };
+    // tex_ は廃止。bgfx::TextureHandle は slot.handle に集約。
     AtlasPageStats stats_;
     std::vector<GlyphInfo> pendingUploads_;
 };
@@ -1963,6 +2017,12 @@ public:
         std::lock_guard lock(mutex_);
         if (idx < pages_.size()) return pages_[idx].handle();
         return nulltex;
+    }
+    // ★ TextureSlot* を返す (= ResolvedTexture.slot で握る用)。stable address。
+    TextureSlot* getPageSlot(uint16_t idx) {
+        std::lock_guard lock(mutex_);
+        if (idx < pages_.size()) return &pages_[idx].slot;
+        return nullptr;
     }
 
     size_t pageCount() const {

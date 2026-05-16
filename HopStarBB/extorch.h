@@ -1626,8 +1626,8 @@ CustomModuleImpl* GoThread(ThreadGC* thgc) {
     initTable(thgc, table);
     table->gridColor = 0x000000FF;
     table->treeView = true;
-    table->treeIconSize = 10;
-    table->treeIndent = 16;
+    table->treeIconSize = Scf(10);
+    table->treeIndent = Scf(16);
     setPercentX(table, 0.5, 0, SizeType::Range);
 	setPercentY(table, 1.0, 0, SizeType::Page);
 	NewDirectAddLast(thgc, local, sidelet, table);
@@ -1739,8 +1739,8 @@ CustomModuleImpl* GoThread(ThreadGC* thgc) {
     NewDirectAddLast(thgc, local, line3, sidelet3);
     Button* button = (Button*)GC_alloc(thgc, CType::_ButtonC);
     initButton(thgc, button);
-    button->size.x = 100; button->xtype = SizeType::Range;
-    button->size.y = 24; button->ytype = SizeType::Range;
+    button->size.x = Sc(100); button->xtype = SizeType::Range;
+    button->size.y = Sc(24);  button->ytype = SizeType::Range;
     button->GoMouseDown = (MemFunc*)GC_alloc(thgc, CType::_MemFunc);
     button->GoMouseDown->func = ButtonClick;
     button->GoMouseDown->obj = (MemObj*)GC_alloc(thgc, CType::_MemObj);
@@ -1751,8 +1751,8 @@ CustomModuleImpl* GoThread(ThreadGC* thgc) {
     NewDirectAddLast(thgc, local, button, let);
     Button* openfile = (Button*)GC_alloc(thgc, CType::_ButtonC);
     initButton(thgc, openfile);
-    openfile->size.x = 100; openfile->xtype = SizeType::Range;
-    openfile->size.y = 24; openfile->ytype = SizeType::Range;
+    openfile->size.x = Sc(100); openfile->xtype = SizeType::Range;
+    openfile->size.y = Sc(24); openfile->ytype = SizeType::Range;
     openfile->GoMouseDown = (MemFunc*)GC_alloc(thgc, CType::_MemFunc);
     openfile->GoMouseDown->func = OpenFile;
     openfile->GoMouseDown->obj = (MemObj*)GC_alloc(thgc, CType::_MemObj);
@@ -1763,8 +1763,8 @@ CustomModuleImpl* GoThread(ThreadGC* thgc) {
     NewDirectAddLast(thgc, local, openfile, let);
     Button* cont = (Button*)GC_alloc(thgc, CType::_ButtonC);
     initButton(thgc, cont);
-    cont->size.x = 100; cont->xtype = SizeType::Range;
-    cont->size.y = 24; cont->ytype = SizeType::Range;
+    cont->size.x = Sc(100); cont->xtype = SizeType::Range;
+    cont->size.y = Sc(24); cont->ytype = SizeType::Range;
     cont->GoMouseDown = (MemFunc*)GC_alloc(thgc, CType::_MemFunc);
     cont->GoMouseDown->func = ContinueClick;
     cont->GoMouseDown->obj = (MemObj*)GC_alloc(thgc, CType::_MemObj);
@@ -1775,8 +1775,8 @@ CustomModuleImpl* GoThread(ThreadGC* thgc) {
     NewDirectAddLast(thgc, local, cont, let);
     Button* stepin = (Button*)GC_alloc(thgc, CType::_ButtonC);
     initButton(thgc, stepin);
-    stepin->size.x = 100; stepin->xtype = SizeType::Range;
-    stepin->size.y = 24; stepin->ytype = SizeType::Range;
+    stepin->size.x = Sc(100); stepin->xtype = SizeType::Range;
+    stepin->size.y = Sc(24); stepin->ytype = SizeType::Range;
     stepin->GoMouseDown = (MemFunc*)GC_alloc(thgc, CType::_MemFunc);
     stepin->GoMouseDown->func = StepInClick;
     stepin->GoMouseDown->obj = (MemObj*)GC_alloc(thgc, CType::_MemObj);
@@ -1787,8 +1787,8 @@ CustomModuleImpl* GoThread(ThreadGC* thgc) {
     NewDirectAddLast(thgc, local, stepin, let);
     Button* stepover = (Button*)GC_alloc(thgc, CType::_ButtonC);
     initButton(thgc, stepover);
-    stepover->size.x = 100; stepover->xtype = SizeType::Range;
-    stepover->size.y = 24; stepover->ytype = SizeType::Range;
+    stepover->size.x = Sc(100); stepover->xtype = SizeType::Range;
+    stepover->size.y = Sc(24); stepover->ytype = SizeType::Range;
     stepover->GoMouseDown = (MemFunc*)GC_alloc(thgc, CType::_MemFunc);
     stepover->GoMouseDown->func = StepOverClick;
     stepover->GoMouseDown->obj = (MemObj*)GC_alloc(thgc, CType::_MemObj);
@@ -1799,8 +1799,8 @@ CustomModuleImpl* GoThread(ThreadGC* thgc) {
     NewDirectAddLast(thgc, local, stepover, let);
     Button* stepout = (Button*)GC_alloc(thgc, CType::_ButtonC);
     initButton(thgc, stepout);
-    stepout->size.x = 100; stepout->xtype = SizeType::Range;
-    stepout->size.y = 24; stepout->ytype = SizeType::Range;
+    stepout->size.x = Sc(100); stepout->xtype = SizeType::Range;
+    stepout->size.y = Sc(24); stepout->ytype = SizeType::Range;
     stepout->GoMouseDown = (MemFunc*)GC_alloc(thgc, CType::_MemFunc);
     stepout->GoMouseDown->func = StepOutClick;
     stepout->GoMouseDown->obj = (MemObj*)GC_alloc(thgc, CType::_MemObj);
@@ -1935,7 +1935,12 @@ CustomModuleImpl* GoThread(ThreadGC* thgc) {
         [](ThreadGC* thgc, const char* path) {
             std::string p(path);
             LoadFileAsync(thgc, p, [p](ThreadGC* thgc, Stream* s) {
-                if (!s) return;
+                if (!s) {
+                    // ファイル不在 / 読み取り失敗 → state.db から消す (= 次回 replay 対象外)。
+                    SDL_Log("[state] replay open failed, removing from db: %s", p.c_str());
+                    state::remove_open(thgc, p);
+                    return;
+                }
                 NewElement* viewer = nullptr;
                 switch (detectFileKind(p.c_str(), s)) {
                 case FileKind::Text:
@@ -1963,10 +1968,22 @@ CustomModuleImpl* GoThread(ThreadGC* thgc) {
                 add_mapy(thgc, thgc->map, pathStr2, (char*)viewer);
                 // BP のガター赤丸を復元 (= LLDBClient.breakpoints は bpCb で先行充填済み)
                 paintBreakpointsForFile(thgc, thgc->local, viewer, p.c_str());
-                const char* bn = strrchr(p.c_str(), '/');
-                if (!bn) bn = strrchr(p.c_str(), '\\');
-                bn = bn ? bn + 1 : p.c_str();
-                AddViewerToTab(thgc, viewer, bn);
+                // タブ名 = ファイル表示名。Android SAF (content://) URI のときは
+                // ContentResolver から DISPLAY_NAME を取得 (= "tone.xml" 等)。
+                // 失敗時 / 通常 path は末尾セグメントをフォールバックで使う。
+                std::string displayName;
+#ifdef __ANDROID__
+                if (p.rfind("content://", 0) == 0) {
+                    displayName = androidDisplayNameForUri(p);
+                }
+#endif
+                if (displayName.empty()) {
+                    const char* bn = strrchr(p.c_str(), '/');
+                    if (!bn) bn = strrchr(p.c_str(), '\\');
+                    bn = bn ? bn + 1 : p.c_str();
+                    displayName = bn;
+                }
+                AddViewerToTab(thgc, viewer, displayName.c_str());
             });
         },
         // bpCb: 1 BP ごとに呼ばれる (= LLDBClient のリストに復元)

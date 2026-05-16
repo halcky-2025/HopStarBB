@@ -22,7 +22,7 @@ void ImageDraw(ThreadGC* thgc, NewElement* elem, NewGraphic* g, NewLocal* local,
 	if (isValidImageId(elem->background->tex1)) {
 		ResolvedTexture rt = myResolveForDraw(thgc, elem->background->tex1);
 		if (rt.isValid()) {
-			tex1 = rt.texture;
+			tex1 = rt.texture();
 			elem->background->angle = rt.u0;
 			elem->background->curl = rt.v0;
 			elem->background->scrollX = rt.u1;
@@ -31,15 +31,15 @@ void ImageDraw(ThreadGC* thgc, NewElement* elem, NewGraphic* g, NewLocal* local,
 	}
 	if (isValidImageId(elem->background->tex2)) {
 		ResolvedTexture rt2 = myResolveForDraw(thgc, elem->background->tex2);
-		if (rt2.isValid()) tex2 = rt2.texture;
+		if (rt2.isValid()) tex2 = rt2.texture();
 	}
 	if (isValidImageId(elem->background->tex3)) {
 		ResolvedTexture rt3 = myResolveForDraw(thgc, elem->background->tex3);
-		if (rt3.isValid()) tex3 = rt3.texture;
+		if (rt3.isValid()) tex3 = rt3.texture();
 	}
 	if (isValidImageId(elem->background->tex4)) {
 		ResolvedTexture rt4 = myResolveForDraw(thgc, elem->background->tex4);
-		if (rt4.isValid()) tex4 = rt4.texture;
+		if (rt4.isValid()) tex4 = rt4.texture();
 	}
 	g->layer->pushBackground(elem->background, g->pos.x + elem->margins[3], g->pos.y + elem->margins[0], elem->size.x + elem->paddings[1] + elem->paddings[3], elem->size.y + elem->paddings[0] + elem->paddings[2], g->zIndex + elem->zIndex + 0.1,
 		tex1, tex2, tex3, tex4, g->fb, g->fbsize, g->viewId, 0.0f, elem->boWidthes, &elem->background->bs);
@@ -167,7 +167,7 @@ void DropDraw(ThreadGC* thgc, NewElement* elem, NewGraphic* g, NewLocal* local, 
 	if (isValidImageId(elem->background->tex1)) {
 		ResolvedTexture rt = myResolveForDraw(thgc, elem->background->tex1);
 		if (rt.isValid()) {
-			tex1 = rt.texture;
+			tex1 = rt.texture();
 			elem->background->angle = rt.u0;
 			elem->background->curl = rt.v0;
 			elem->background->scrollX = rt.u1;
@@ -176,7 +176,7 @@ void DropDraw(ThreadGC* thgc, NewElement* elem, NewGraphic* g, NewLocal* local, 
 	}
 	if (isValidImageId(elem->background->tex2)) {
 		ResolvedTexture rt2 = myResolveForDraw(thgc, elem->background->tex2);
-		if (rt2.isValid()) tex2 = rt2.texture;
+		if (rt2.isValid()) tex2 = rt2.texture();
 	}
 	g->layer->pushBackground(elem->background, g->pos.x + elem->pos.x + elem->margins[3], g->pos.y + elem->pos.y + elem->margins[0], elem->size.x + elem->paddings[1] + elem->paddings[3], elem->size.y + elem->paddings[0] + elem->paddings[2], g->zIndex + elem->zIndex + 0.1,
 		tex1, tex2, &nulltex, &nulltex, g->fb, g->fbsize, g->viewId, 0.0f, elem->boWidthes, &elem->background->bs);
@@ -315,10 +315,22 @@ void initPopup(ThreadGC* thgc, NewLocal* local, PopupWindow* popup, PopupAnchor 
 	popup->offscreened = true;
 	popup->background = (Background*)GC_alloc(thgc, CType::_Background);
 	popup->background->fillcolor = 0xffffffff;
+#if defined(__ANDROID__)
+	// Android では別 OS window が無く、popup を main backbuffer にオーバーレイ描画する。
+	// → SDL_CreatePopupWindow が描いてくれていた境界が無いので、UI 側でボーダー / シャドウを
+	//   描画する。これで popup らしい見た目になり、背景の UI との視覚的区切りが付く。
+	popup->background->bs.borderColor = 0xC0C0C0FF;  // light gray border
+	popup->boWidthes[0] = popup->boWidthes[1] = popup->boWidthes[2] = popup->boWidthes[3] = 1.0f;
+	popup->background->bs.shadowBlur = 8.0f;
+	popup->background->bs.shadowColor = 0x00000040;  // semi-transparent shadow
+	popup->background->bs.shadowX = 0.0f;
+	popup->background->bs.shadowY = 2.0f;
+#else
 	popup->background->bs.borderColor = 0x00000000;
 	popup->boWidthes[0] = popup->boWidthes[1] = popup->boWidthes[2] = popup->boWidthes[3] = 0.0f;
 	popup->background->bs.shadowBlur = 1.0f;
 	popup->background->bs.shadowColor = 0x00000000;
+#endif
 	popup->Measure = PopupMeasure;
 	popup->Draw = ElementDraw;
 	popup->Mouse = ElementMouse;
@@ -329,6 +341,23 @@ void initPopup(ThreadGC* thgc, NewLocal* local, PopupWindow* popup, PopupAnchor 
 	if (p) {
 		p->local = popup;
 		popup->offscreen->window = p;
+#if defined(__ANDROID__)
+		// Android: 別 OS window が無いので、popup の絶対位置を **parent chain 経由で**
+		// 解決させる。子要素リスト (childend) には挿入せず popup->parent のみセット:
+		//   - getAbsolutePosition(popup) は parent ポインタを辿って anchor の絶対位置を
+		//     取得し、popup->pos を加算 → anchor 真下に表示される
+		//   - anchor element の measure / draw / hit test の子ループには popup は入らない
+		//     → toolline / drop 等のレイアウトや click 動線を壊さない
+		//   - popup の描画は screen ループ (drawScreen) が独立に行う
+		if (pa == PopupAnchor::Anchor_Element && elem) {
+			popup->parent = elem;
+			popup->pos.x = 0;
+			popup->pos.y = (float)elem->size.y;  // anchor elem の真下
+		} else {
+			popup->pos.x = (float)x;
+			popup->pos.y = (float)y;
+		}
+#endif
 	}
 	popup->animate = -1;
 }
@@ -424,6 +453,29 @@ void TabDraw(ThreadGC* thgc, NewElement* elem, NewGraphic* g, NewLocal* local, R
 	float sizex = elem->size.x + elem->paddings[1] + elem->paddings[3]; float sizey = elem->size.y + elem->paddings[0] + elem->paddings[2];
 	float viewSizex = sizex, viewSizey = sizey;
 	float tabExtL = 0, tabExtR = 0, tabExtT = 0, tabExtB = 0;
+
+	// スクロールバー描画。winFb に zIndex 10001 で書く。オフスクリーン処理 (blit /
+	// write / early-return) に左右されない位置で一回走らせて、PaintOffscreen で
+	// early-return しても毎フレーム描かれるようにする (=スクロール値が変化したら
+	// 即追従)。ElementDraw 側と同じパターン。
+	if (g->winFb) {
+		PointF absPos2 = getAbsolutePosition(elem);
+		if (baseType(elem->ytype) == SizeType::Scroll) {
+			drawRightScrollBar(g->layer,
+				absPos2.x + viewSizex - sbarx * 3 / 2, absPos2.y, sbarx, viewSizey - sbary, sbarx * 3 / 2,
+				elem->scroll.y, viewSizey, elem->size2.y,
+				10001.0f,
+				g->winFb, g->winFbsize, g->winViewId);
+		}
+		if (baseType(elem->xtype) == SizeType::Scroll) {
+			drawUnderScrollBar(g->layer,
+				absPos2.x, absPos2.y + viewSizey - sbary * 3 / 2, viewSizex - sbarx, sbary, sbary * 3 / 2,
+				elem->scroll.x, viewSizex, elem->size2.x,
+				10001.0f,
+				g->winFb, g->winFbsize, g->winViewId);
+		}
+	}
+
 	if (elem->offscreen != NULL) {
 		if (elem->background) {
 			float tabR = elem->background->backUVMinX;
@@ -438,6 +490,7 @@ void TabDraw(ThreadGC* thgc, NewElement* elem, NewGraphic* g, NewLocal* local, R
 		}
 		// PaintOffscreenならこのoffscreenの描画は不要（子offscreenはugui.hのループで個別に処理される）
 		if (g->paint == Offscreen::PaintOffscreen) return;
+		elem->offscreen->paint = Offscreen::PaintOffscreen;
 		float z = 0;
 		PointF absPos = getAbsolutePosition(elem, &z);
 		if (elem->size2.x >= sizex) sizex = elem->size2.x;
@@ -480,8 +533,8 @@ void TabDraw(ThreadGC* thgc, NewElement* elem, NewGraphic* g, NewLocal* local, R
 			elem->offscreen->imPing = queueOffscreenResize(thgc, elem->offscreen->imPing, size3x, size3y, pageW, pageH);
 			elem->offscreen->imPong = queueOffscreenResize(thgc, elem->offscreen->imPong, size3x, size3y, pageW, pageH);
 		}
-		ImageId readId = elem->offscreen->ping ? elem->offscreen->imPing : elem->offscreen->imPong;
-		ImageId writeId = elem->offscreen->ping ? elem->offscreen->imPong : elem->offscreen->imPing;
+		ImageId readId = elem->offscreen->imPing;
+		ImageId writeId = elem->offscreen->imPing;
 
 		// タイルFBOか通常FBOかで分岐
 		TiledTextureInfo* tiledRead = mygetTiledTextureInfo(thgc, readId);
@@ -550,6 +603,7 @@ void TabDraw(ThreadGC* thgc, NewElement* elem, NewGraphic* g, NewLocal* local, R
 					texSlots[1], texSlots[2], texSlots[3]);
 			}
 			if (g->paint == Offscreen::PaintOffscreen) return;
+			elem->offscreen->paint = Offscreen::PaintOffscreen;
 			// 書き込み: LayerInfoにタイル状態を設定し、push関数が自動的にタイル展開する
 			TiledTextureInfo* tiledWrite = mygetTiledTextureInfo(thgc, writeId);
 			if (tiledWrite && !tiledWrite->tiles.empty()) {
@@ -645,6 +699,7 @@ void TabDraw(ThreadGC* thgc, NewElement* elem, NewGraphic* g, NewLocal* local, R
 					bg ? bg->backUVMinX : 0.0f);
 			}
 			if (g->paint == Offscreen::PaintOffscreen) return;
+			elem->offscreen->paint = Offscreen::PaintOffscreen;
 			auto writeInfo = mygetStandaloneTextureInfo(thgc, writeId);
 			uint64_t offscreenViewId = ::viewId++;
 			g2 = NewGraphic{ g->layer, elem, elem, {tabExtL, tabExtT}, {elem->size2.x + tabExtL + tabExtR, elem->size2.y + tabExtT + tabExtB}, {0,0}, {0,0},
@@ -666,24 +721,25 @@ void TabDraw(ThreadGC* thgc, NewElement* elem, NewGraphic* g, NewLocal* local, R
 
 	if (elem->background != NULL) {
 		bgfx::TextureHandle* tex1, * tex2, * tex3, * tex4;
+		// 全 placement 共通: myResolveSlot で stable な &slot.handle を取る。
 		if (isValidImageId(elem->background->tex1)) {
-			auto info = mygetStandaloneTextureInfo(thgc, elem->background->tex1);
-			tex1 = &info->handle;
+			auto* slot = myResolveSlot(thgc, elem->background->tex1);
+			tex1 = slot ? &slot->handle : &nulltex;
 		}
 		else tex1 = &nulltex;
 		if (isValidImageId(elem->background->tex2)) {
-			auto info = mygetStandaloneTextureInfo(thgc, elem->background->tex2);
-			tex2 = &info->handle;
+			auto* slot = myResolveSlot(thgc, elem->background->tex2);
+			tex2 = slot ? &slot->handle : &nulltex;
 		}
 		else tex2 = &nulltex;
 		if (isValidImageId(elem->background->tex3)) {
-			auto info = mygetStandaloneTextureInfo(thgc, elem->background->tex3);
-			tex3 = &info->handle;
+			auto* slot = myResolveSlot(thgc, elem->background->tex3);
+			tex3 = slot ? &slot->handle : &nulltex;
 		}
 		else tex3 = &nulltex;
 		if (isValidImageId(elem->background->tex4)) {
-			auto info = mygetStandaloneTextureInfo(thgc, elem->background->tex4);
-			tex4 = &info->handle;
+			auto* slot = myResolveSlot(thgc, elem->background->tex4);
+			tex4 = slot ? &slot->handle : &nulltex;
 		}
 		else tex4 = &nulltex;
 		bool hasOffscreen = elem->offscreen != NULL;
@@ -715,21 +771,9 @@ void TabDraw(ThreadGC* thgc, NewElement* elem, NewGraphic* g, NewLocal* local, R
 		child->Draw(child->gc, child, &g2, child->gc->local, q);
 		child = child->next;
 	}
-	// スクロールバー描画
-	if (baseType(elem->ytype) == SizeType::Scroll) {
-		drawRightScrollBar(g2.layer,
-			sizex - sbarx * 3 / 2, 0, sbarx, sizey - sbary, sbarx * 3 / 2,
-			elem->scroll.y, sizey, elem->size2.y,
-			g2.zIndex + 100.0f,
-			g2.fb, g2.fbsize, g2.viewId);
-	}
-	if (baseType(elem->xtype) == SizeType::Scroll) {
-		drawUnderScrollBar(g2.layer,
-			0, sizey - sbary * 3 / 2, sizex - sbarx, sbary, sbary * 3 / 2,
-			elem->scroll.x, sizex, elem->size2.x,
-			g2.zIndex + 100.0f,
-			g2.fb, g2.fbsize, g2.viewId);
-	}
+	// スクロールバー描画は ↑ オフスクリーン処理の前に winFb 上で済ませた。
+	// 旧コード (offscreen FBO への描画) は PaintOffscreen で early-return すると
+	// scroll 値変化に追従しない (FBO cache に古い位置が残る) ため削除。
 	// タイル描画状態を親の値で復元 (nullptr で潰すと外側のタイル展開が壊れる)
 	g->layer->tiledTarget         = _saveTiledTarget;
 	g->layer->tiledTargetImageId  = _saveTiledTargetImageId;
@@ -923,10 +967,10 @@ int TabMouse(ThreadGC* thgc, NewElement* self, MouseEvent* e, PointF pos, NewLoc
 			if (elem->type == _Sidelet && elem->background) {
 				Sidelet* sidelet = (Sidelet*)elem;
 				switch (sidelet->direction) {
-				case 0: hitT = 18; break;
-				case 1: hitR = 18; break;
-				case 2: hitB = 18; break;
-				case 3: hitL = 18; break;
+				case 0: hitT = Sctf(18, 2.0f); break;
+				case 1: hitR = Sctf(18, 2.0f); break;
+				case 2: hitB = Sctf(18, 2.0f); break;
+				case 3: hitL = Sctf(18, 2.0f); break;
 				}
 			}
 			if (self->orient) {
@@ -941,6 +985,7 @@ int TabMouse(ThreadGC* thgc, NewElement* self, MouseEvent* e, PointF pos, NewLoc
 							NewTabTitle* title = (NewTabTitle*)elem;
 							tab->linked->page = title->page;
 							markLayoutOf(tab->linked, local);
+							FindOffscreen(tab)->markPaint(local, Offscreen::PaintCommand);
 							// ページが別スレッド所有の NewLocal なら hoppy->target も切替
 							if (title->page && title->page->type == LetterType::_Main) {
 								NewLocal* pageLocal = (NewLocal*)title->page;
@@ -964,6 +1009,7 @@ int TabMouse(ThreadGC* thgc, NewElement* self, MouseEvent* e, PointF pos, NewLoc
 							NewTabTitle* title = (NewTabTitle*)elem;
 							tab->linked->page = title->page;
 							markLayoutOf(tab->linked, local);
+							FindOffscreen(tab)->markPaint(local, Offscreen::PaintCommand);
 							// ページが別スレッド所有の NewLocal なら hoppy->target も切替
 							if (title->page && title->page->type == LetterType::_Main) {
 								NewLocal* pageLocal = (NewLocal*)title->page;
@@ -1356,7 +1402,8 @@ void ButtonClick(Frame* frame) {
 		// ただし子プロセス側 (= 既に inferior として動いてる HopStarBB.exe) でこの
 		// 行に到達したら、孫プロセスを生まない。env var "HOPSTARBB_LLDB_CHILD" を
 		// startDebug が子に注入し、子側はここで早期 return する。
-		if (GetEnvironmentVariableA("HOPSTARBB_LLDB_CHILD", NULL, 0) > 0) {
+		// 環境変数チェック: getenv は POSIX 標準で Win/Linux/Mac/Android 全部で動く。
+		if (getenv("HOPSTARBB_LLDB_CHILD") != NULL) {
 			fprintf(stderr, "[LLDB] inferior 側のクリック: 孫 spawn は抑制\n");
 		}
 		else {
@@ -1382,7 +1429,10 @@ void initButton(ThreadGC* thgc, Button* button) {
 	button->before = button;
 	button->parent = NULL;
 	button->childend = (NewElement*)GC_alloc(thgc, CType::_EndC);
-	for(int i = 0; i < 4; i++) button->margins[i] = 5;
+	for(int i = 0; i < 4; i++) button->margins[i] = Sc(5);
+	// 内側余白 (text と border の間)。論理 dp 6 横、4 縦 のあたりが押しやすく見た目も自然。
+	button->paddings[0] = button->paddings[2] = Sc(4);
+	button->paddings[1] = button->paddings[3] = Sc(6);
 	initNewEndElement(thgc, (NewEndElement*)button->childend, button);
 	button->id = 0;
 	button->Measure = ElementMeasure;
@@ -1403,13 +1453,13 @@ void initButton(ThreadGC* thgc, Button* button) {
 	int size = widths.size();
 	button->background->count = size;
 	button->background->type = DrawCommandType::Gradient;
-	for(int i = 0; i < 4; i++) button->background->bs.boRadiuses[i] = 12;
-	for (int i = 0; i < 4; i++) button->boWidthes[i] = 1;
+	for(int i = 0; i < 4; i++) button->background->bs.boRadiuses[i] = Sc(12);
+	for (int i = 0; i < 4; i++) button->boWidthes[i] = Sc(1);
 	button->background->bs.borderColor = 0x000000FF;
 	button->background->bs.shadowColor = 0x80808000;
-	button->background->bs.shadowBlur = 1.5f;
-	button->background->bs.shadowX = 3.0f;
-	button->background->bs.shadowY = 3.0f;
+	button->background->bs.shadowBlur = Scf(1.5f);
+	button->background->bs.shadowX = Scf(3.0f);
+	button->background->bs.shadowY = Scf(3.0f);
 	button->background->cornerPattern = 0;
 	button->background->backUVMinX = 10.0;
 	button->background->fillcolor = 0xffffffff;
@@ -1456,44 +1506,76 @@ int SideletMouse(ThreadGC* thgc, NewElement* self, MouseEvent* e, PointF pos, Ne
 	Sidelet* sidelet = (Sidelet*)self;
 	ElementMouse(thgc, self, e, pos, local);
 	if (e->action == SDL_EVENT_MOUSE_BUTTON_DOWN) {
-		int x = 1;
+		SDL_Log("[Sidelet] BUTTON_DOWN e=(%.0f,%.0f) pos=(%.0f,%.0f) "
+		        "self.pos=(%.0f,%.0f) self.size=(%.0f,%.0f) dir=%d percent=%.2f animate=%.2f hide=%d",
+		        (float)e->x, (float)e->y, pos.x, pos.y,
+		        self->pos.x, self->pos.y, self->size.x, self->size.y,
+		        sidelet->direction, sidelet->percent, self->animate, (int)sidelet->hide);
 	}
 	float bx, ax, by, ay;
 	if (sidelet->direction == 0) {
-		bx = self->pos.x + (self->size.x + self->paddings[1] + self->paddings[3]) * sidelet->percent + self->margins[3] - 12;
-		ax = bx + 24;
+		bx = self->pos.x + (self->size.x + self->paddings[1] + self->paddings[3]) * sidelet->percent + self->margins[3] - Sctf(12, 2.0f);
+		ax = bx + Sctf(24, 2.0f);
 		ay = self->pos.y + self->margins[0];
-		by = ay - 18;
+		by = ay - Sctf(18, 2.0f);
 	}
 	else if (sidelet->direction == 1) {
 		bx = self->pos.x + self->size.x + self->margins[3] + self->boWidthes[3] + self->paddings[3] + self->paddings[1];
-		ax = bx + 18;
-		by = self->pos.y + (self->size.y + self->paddings[0] + self->paddings[2]) * sidelet->percent + self->margins[0] - 12;
-		ay = by + 24;
+		ax = bx + Sctf(18, 2.0f);
+		by = self->pos.y + (self->size.y + self->paddings[0] + self->paddings[2]) * sidelet->percent + self->margins[0] - Sctf(12, 2.0f);
+		ay = by + Sctf(24, 2.0f);
 	}
 	else if (sidelet->direction == 2) {
-		bx = self->pos.x + (self->size.x + self->paddings[1] + self->paddings[3]) * sidelet->percent + self->margins[3] - 12;
-		ax = bx + 24;
+		bx = self->pos.x + (self->size.x + self->paddings[1] + self->paddings[3]) * sidelet->percent + self->margins[3] - Sctf(12, 2.0f);
+		ax = bx + Sctf(24, 2.0f);
 		by = self->pos.y + self->size.y + self->margins[0] + self->boWidthes[0] + self->paddings[3] + self->paddings[1];
-		ax = by + 18;
+		ax = by + Sctf(18, 2.0f);
 	}
 	else if (sidelet->direction == 3) {
 		ax = self->pos.x + self->margins[3];
-		bx = ax - 18;
-		by = self->pos.y + (self->size.y + self->paddings[0] + self->paddings[2]) * sidelet->percent + self->margins[0] - 12;
-		ay = by + 24;
+		bx = ax - Sctf(18, 2.0f);
+		by = self->pos.y + (self->size.y + self->paddings[0] + self->paddings[2]) * sidelet->percent + self->margins[0] - Sctf(12, 2.0f);
+		ay = by + Sctf(24, 2.0f);
+	}
+	if (e->action == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+		float lx = (float)e->x - pos.x;
+		float ly = (float)e->y - pos.y;
+		bool xOk = (bx < lx && lx <= ax);
+		bool yOk = (by < ly && ly <= ay);
+		SDL_Log("[Sidelet] knob bx=%.0f ax=%.0f by=%.0f ay=%.0f localxy=(%.0f,%.0f) xOk=%d yOk=%d %s",
+		        bx, ax, by, ay, lx, ly, (int)xOk, (int)yOk,
+		        (xOk && yOk) ? "HIT" : "MISS");
 	}
 	if (bx < e->x - pos.x && e->x - pos.x <= ax) {
 		if (by < e->y - pos.y && e->y - pos.y <= ay) {
 			if (e->action == SDL_EVENT_MOUSE_BUTTON_DOWN) {
-				if (self->animate == -2) {
+				// 現在の "表示状態" を判定。
+				//   -1                 ⇒ 完全表示中
+				//   -2                 ⇒ 完全非表示
+				//   0 〜 1 のいずれか ⇒ アニメ進行中 / 進行待ち
+				//     hide animation:  animate 1.0 → 0  (始点 = 表示中)
+				//     show animation:  animate 0   → 1.0 (始点 = 非表示)
+				//   旧コードは -1 / -2 にしか反応せず、進行中タップを完全に
+				//   無視して "全く反応しない" 状態に陥っていた。
+				//   進行中なら現在値から「より近い settled state」を推定して
+				//   逆方向アニメを起動する (タップごとにトグル)。
+				bool isCurrentlyVisible;
+				if (self->animate == -1)        isCurrentlyVisible = true;
+				else if (self->animate == -2)   isCurrentlyVisible = false;
+				else                            isCurrentlyVisible = (self->animate >= 0.5f);
+				SDL_Log("[Sidelet] HIT toggle: animate=%.2f -> isVisible=%d -> %s",
+				        self->animate, (int)isCurrentlyVisible,
+				        isCurrentlyVisible ? "HIDE" : "SHOW");
+				if (!isCurrentlyVisible) {
+					// 非表示 → 表示開始
 					self->animate = 0;
 					auto anim = animateSlide(thgc, sidelet, 1.0, true);
 					auto coro = anim.coro;
 					anim.coro = {};
 					thgc->animQueue->push(coro);
 				}
-				else if (self->animate == -1) {
+				else {
+					// 表示中 → 非表示開始
 					self->animate = 1.0;
 					auto anim = animateSlide(thgc, sidelet, 1.0, false);
 					auto coro = anim.coro;
@@ -1536,14 +1618,16 @@ void initSidelet(ThreadGC* thgc, Sidelet* sidelet) {
 	sidelet->offscreened = true;
 	sidelet->background = (Background*)GC_alloc(thgc, CType::_Background);
 	sidelet->background->type = DrawCommandType::Fill;
-	for (int i = 0; i < 4; i++) sidelet->boWidthes[i] = 1;
+	for (int i = 0; i < 4; i++) sidelet->boWidthes[i] = Sc(1);
 	sidelet->background->bs.borderColor = 0x000000FF;
 	sidelet->background->bs.shadowColor = 0x80808000;
-	sidelet->background->bs.shadowBlur = 1.5f;
-	sidelet->background->bs.shadowX = 3.0f;
-	sidelet->background->bs.shadowY = 3.0f;
+	sidelet->background->bs.shadowBlur = Scf(1.5f);
+	sidelet->background->bs.shadowX = Scf(3.0f);
+	sidelet->background->bs.shadowY = Scf(3.0f);
 	sidelet->background->cornerPattern = 9 + sidelet->direction + sidelet->percent;
-	sidelet->background->backUVMinX = 12.0;
+	// つまみは指で掴むので touch scale を効かせる。Windows では 12, Android では
+	// 12 * 2.625 * 2.5 ≈ 79 px になり、指でしっかり掴める大きさ。
+	sidelet->background->backUVMinX = Sctf(12.0);
 	sidelet->background->fillcolor = 0xffffffff;
 	sidelet->animate = -2;
 }
@@ -2559,6 +2643,7 @@ void NewTableDraw(ThreadGC* thgc, NewElement* elem, NewGraphic* g, NewLocal* loc
 
 	// Table は常に offscreened
 	if (elem->offscreen != NULL) {
+		elem->offscreen->paint = Offscreen::PaintOffscreen;
 		// === 2a. tabExt (cornerPattern からタブ拡張) ===
 		if (elem->background) {
 			float tabR = elem->background->backUVMinX;
@@ -3311,17 +3396,11 @@ void NewTableDraw(ThreadGC* thgc, NewElement* elem, NewGraphic* g, NewLocal* loc
 			pushDisplay(fzW+scrX, fzH+scrY, dispBaseX+fzW,    dispBaseY+fzH,    visW, visH); // Center
 		}
 
-		if (g->paint == Offscreen::PaintOffscreen) {
-			g->layer->tiledTarget         = _saveTiledTarget;
-			g->layer->tiledTargetImageId  = _saveTiledTargetImageId;
-			g->layer->tiledPlaceholderFBO = _saveTiledPlaceholderFBO;
-			g->layer->tiledBaseViewId     = _saveTiledBaseViewId;
-			return;
-		}
-
 		// === 7. スクロールバー / ページングバー overlay ===
 		// offscreen で描画した内容を window fb に display した上に、スクロール量を
 		// 視覚化する overlay を重ねる。
+		// 重要: PaintOffscreen で early-return すると scroll 値の変化に追従しない
+		// (cache にスクロール値が乗らない設計) ため、early-return より前で書く。
 		// z は dispZ + 1 (= table image より必ず上) にする。固定 10001 だと親 sidelet 等の
 		// zIndex によって image が 10001 を超えて隠す事故が起きる。
 		{
@@ -3355,6 +3434,14 @@ void NewTableDraw(ThreadGC* thgc, NewElement* elem, NewGraphic* g, NewLocal* loc
 					currentPage, totalPages,
 					overlayZ, g2.group, g2.winFb, g2.winFbsize, g2.winViewId);
 			}
+		}
+
+		if (g->paint == Offscreen::PaintOffscreen) {
+			g->layer->tiledTarget         = _saveTiledTarget;
+			g->layer->tiledTargetImageId  = _saveTiledTargetImageId;
+			g->layer->tiledPlaceholderFBO = _saveTiledPlaceholderFBO;
+			g->layer->tiledBaseViewId     = _saveTiledBaseViewId;
+			return;
 		}
 	}
 	else {
@@ -4195,8 +4282,8 @@ inline void initTable(ThreadGC* thgc, NewTable* t) {
 	t->gridColor  = 0xC0C0C0FF;
 	// ツリービュー: デフォルト OFF。treeView=true で最初の非 header 列に展開 UI 表示。
 	t->treeView      = false;
-	t->treeIndent    = 16.0f;
-	t->treeIconSize  = 9.0f;
+	t->treeIndent    = Scf(16.0f);
+	t->treeIconSize  = Scf(9.0f);
 	t->treeLineColor = 0x3070C0FF;  // 青系 (+/- 線 / 接続線 の色)
 
 	// columns / rows はポインタリスト。要素は GC_alloc された ColumnInfo* / RowInfo*。
@@ -4211,8 +4298,8 @@ inline void initTable(ThreadGC* thgc, NewTable* t) {
 	t->nextRowId = 0;
 	t->nextColId = 0;
 	// 自動追加時のデフォルトサイズ。後から `t->defaultColWidth = ...;` で上書き可。
-	t->defaultColWidth  = 80.0f;
-	t->defaultRowHeight = 24.0f;
+	t->defaultColWidth  = Scf(80.0f);
+	t->defaultRowHeight = Scf(24.0f);
 	// ヘッダ用テキスト / 背景色 (= ColumnInfo::showLineNumbers / RowInfo::showColumnLetters の列・行で使われる)
 	t->headerTextColor = 0x808080FF;
 	t->headerBgColor   = 0xF0F0F0FF;
@@ -4692,6 +4779,22 @@ void OpenFile(Frame* frame) {
 			// (7): main thread, viewer 作成
 			if (!s) return;
 
+			// ★ デバッグ: 開いたファイルの最初の数バイト + 検出 kind をログ。
+			//   content:// URI 経由で別ファイルが返ってきてないか、kind 検出が
+			//   おかしくなってないかを確認するため。
+			{
+				const uint8_t* d = s->data;
+				size_t n = s->size;
+				char hex[64] = {0};
+				size_t hn = n < 16 ? n : 16;
+				for (size_t i = 0; i < hn; i++) {
+					snprintf(hex + i*3, 4, "%02x ", (unsigned)d[i]);
+				}
+				FileKind kBytes = detectFileKindFromBytes(d, n);
+				FileKind kExt = detectFileKindFromExt(pathStr.c_str());
+				SDL_Log("[OpenFile] path=%s size=%zu first16=%s kExt=%d kBytes=%d",
+				        pathStr.c_str(), n, hex, (int)kExt, (int)kBytes);
+			}
 			NewElement* viewer = nullptr;
 			switch (detectFileKind(pathStr.c_str(), s)) {
 			case FileKind::Text:
@@ -4738,12 +4841,23 @@ void OpenFile(Frame* frame) {
 			// 既存 BP リストから、このファイルに該当する BP のガター赤丸を復元
 			paintBreakpointsForFile(thgc, thgc->local, viewer, pathStr.c_str());
 
-			// パス末尾をタブ名として使う
-			const char* path = pathStr.c_str();
-			const char* basename = strrchr(path, '/');
-			if (!basename) basename = strrchr(path, '\\');
-			basename = basename ? basename + 1 : path;
-			AddViewerToTab(thgc, viewer, basename);
+			// タブ名 = ファイル表示名
+			std::string displayName;
+#ifdef __ANDROID__
+			// SAF (content://) URI のときは ContentResolver から DISPLAY_NAME を取り出す。
+			// 取れたらそれをタブ名に使う。失敗時はパス末尾フォールバック。
+			if (pathStr.rfind("content://", 0) == 0) {
+				displayName = androidDisplayNameForUri(pathStr);
+			}
+#endif
+			if (displayName.empty()) {
+				const char* path = pathStr.c_str();
+				const char* basename = strrchr(path, '/');
+				if (!basename) basename = strrchr(path, '\\');
+				basename = basename ? basename + 1 : path;
+				displayName = basename;
+			}
+			AddViewerToTab(thgc, viewer, displayName.c_str());
 			});
 		});
 }

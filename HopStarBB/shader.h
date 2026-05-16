@@ -741,7 +741,7 @@ struct DrawBatch {
     float cornerPattern = 0.0f;
     float dctype = 0.0f;
     float minZIndex = 0;
-    std::vector<DrawCommand*> commands;
+    std::vector<UnifiedDrawCommand*> commands;
 };
 
 // ============================================================
@@ -849,7 +849,12 @@ GroupedCommands groupDrawCommands(
     // 二段グループ化:
     //   1) pass = (viewId, fbo, tiledImageId, tileIndex)  ← bgfx view 単位
     //   2) batch = (texture, blend, scissor, zIndexBucket, ...)  ← per-submit 単位
-    std::map<RenderPassKey, std::map<RenderBatchKey, std::vector<DrawCommand*>>> passGroups;
+    //
+    // batch.commands は UnifiedDrawCommand* 型なので、ここで保持するベクタも同型に
+    // しておく (= デバッガで unified 専用フィールド (x/y/width/height 等) を直接覗ける)。
+    // すべての DrawCommand* は実体が UnifiedDrawCommand (shader.h 内 new で生成) なので、
+    // static_cast 安全。混在するようになったら dynamic_cast に切り替え。
+    std::map<RenderPassKey, std::map<RenderBatchKey, std::vector<UnifiedDrawCommand*>>> passGroups;
 
     for (auto* cmd : commands) {
         RenderPassKey passKey;
@@ -870,7 +875,7 @@ GroupedCommands groupDrawCommands(
         batchKey.dctype = cmd->type;
         batchKey.scissor = cmd->scissor;
 
-        passGroups[passKey][batchKey].push_back(cmd);
+        passGroups[passKey][batchKey].push_back(static_cast<UnifiedDrawCommand*>(cmd));
     }
 
     // パターンテクスチャをビルド
@@ -932,6 +937,12 @@ std::vector<T> extractCommands(const std::vector<DrawCommand*>& ptrs) {
 }
 
 auto frameStart = std::chrono::high_resolution_clock::now();
+
+// Backbuffer (main window) 用の viewport offset。Android の system UI を避けるために
+// SDL_GetWindowSafeArea から取得した (x, y) を毎フレーム更新する。他プラットフォームは 0。
+// renderAllCommands の backbuffer 経路 + main.cpp の touch 座標補正が参照。
+int g_backbufferViewOffsetX = 0;
+int g_backbufferViewOffsetY = 0;
 // ============================================================
 // メイン描画関数
 // ============================================================
@@ -992,9 +1003,13 @@ void renderAllCommands(
             bgfx::setViewTransform(bgfxId, NULL, orthoProj);
         }
         else {
+            // backbuffer (= main window) 行き。Android では system UI 領域を避けるため
+            // safe area の (x, y) を viewport offset として適用する。
             bgfx::setViewFrameBuffer(bgfxId, BGFX_INVALID_HANDLE);
             bgfx::setViewClear(bgfxId, clearFlags, 0xa0a0a0ff, 1.0f, 0);
-            bgfx::setViewRect(bgfxId, 0, 0, pass.fbsize->x, pass.fbsize->y);
+            bgfx::setViewRect(bgfxId,
+                (uint16_t)g_backbufferViewOffsetX, (uint16_t)g_backbufferViewOffsetY,
+                pass.fbsize->x, pass.fbsize->y);
             float orthoProj[16];
             bx::mtxOrtho(orthoProj, 0.0f, pass.fbsize->x, pass.fbsize->y, 0.0f, 0.0f, 10000.0f, 0.0f, bgfx::getCaps()->homogeneousDepth);
             bgfx::setViewTransform(bgfxId, NULL, orthoProj);
@@ -1024,7 +1039,7 @@ void renderAllCommands(
                 tex = grouped.patternAtlas->getPaletteTexture();
                 wid = grouped.patternAtlas->getWidthsTexture();
             }
-            drawUnifiedBatch(reinterpret_cast<std::vector<UnifiedDrawCommand*>&>(batch.commands), resources, tex, wid, bgfxId);
+            drawUnifiedBatch(batch.commands, resources, tex, wid, bgfxId);
         }
     }
 }
@@ -1093,7 +1108,9 @@ inline const char* getShaderPlatformSuffix() {
 #if defined(_WIN32)
     return "";  // Windows DirectX shaders have no suffix
 #elif defined(__ANDROID__)
-    return "_a";  // Android Vulkan shaders
+    return "_spv";  // Android Vulkan: reuse the SPIRV shaders (the old _a
+                    // variant in assets is an outdated build with different
+                    // uniforms - _param1 missing, _modelViewProj instead).
 #elif TARGET_OS_IOS || TARGET_OS_SIMULATOR
     return "_mtl";  // iOS uses Metal
 #elif TARGET_OS_MAC

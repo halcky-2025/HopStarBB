@@ -35,6 +35,10 @@
 #include <cstring>
 #include "sqlite3.h"
 
+#ifdef __ANDROID__
+#include <SDL3/SDL.h>  // SDL_GetAndroidInternalStoragePath / SDL_GetAndroidExternalStoragePath
+#endif
+
 #ifdef _WIN32
 #include <windows.h>
 #include <shlobj.h>
@@ -961,7 +965,12 @@ public:
         desc.location = Location::External;
         desc.access = access;
         desc.cacheState = CacheState::Complete;
-        if (fs::exists(osPath)) desc.size = fs::file_size(osPath);
+        // content:// URI (Android SAF) は fs::exists が throw する可能性があるのでスキップ。
+        // size は readLocal で SDL_IOFromFile + SDL_GetIOSize で取れる。
+        if (osPath.rfind("content://", 0) != 0) {
+            std::error_code ec;
+            if (fs::exists(osPath, ec) && !ec) desc.size = fs::file_size(osPath, ec);
+        }
         return desc;
     }
 
@@ -1030,6 +1039,19 @@ private:
         char computerName[MAX_COMPUTERNAME_LENGTH + 1];
         DWORD size = sizeof(computerName);
         m_deviceId = GetComputerNameA(computerName, &size) ? computerName : "unknown-device";
+#elif defined(__ANDROID__)
+        // Android: アプリ専用の internal storage パスを SDL から取得。
+        // /data/data/<package>/files 配下なので書き込み可能。
+        const char* androidInternal = SDL_GetAndroidInternalStoragePath();
+        m_internalStoragePath = androidInternal
+            ? std::string(androidInternal) + "/storage"
+            : "/data/local/tmp/hopstarbb/storage";  // fallback (実機ではまず到達しない)
+
+        // リソースは APK の assets/ にあるが、ここではプレースホルダ。
+        // 実際の resource アクセスは AAssetManager 経由 (今後実装) になる。
+        m_resourcePath = androidInternal ? std::string(androidInternal) + "/resources" : "./resources";
+
+        m_deviceId = "android-device";
 #else
         const char* home = getenv("HOME");
         m_internalStoragePath = home ? std::string(home) + "/.hopstarbb/storage" : "./.hopstarbb/storage";
@@ -1047,6 +1069,51 @@ private:
 
     ReadResult readLocal(const std::string& osPath, uint64_t offset, uint64_t length) {
         ReadResult result;
+#ifdef __ANDROID__
+        // Android: SAF (Storage Access Framework) で返ってくる content:// URI は
+        // 通常のファイルシステムパスじゃないので std::ifstream で開けない。
+        // SDL3 の SDL_IOFromFile は content:// を JNI 経由の ContentResolver.openFileDescriptor
+        // で開いてくれるので、そちらに委譲する。
+        if (osPath.rfind("content://", 0) == 0) {
+            SDL_IOStream* io = SDL_IOFromFile(osPath.c_str(), "rb");
+            if (!io) {
+                result.error = std::string("Failed to open content URI: ") + osPath;
+                return result;
+            }
+            Sint64 fileSize = SDL_GetIOSize(io);
+            if (fileSize < 0) {
+                // 一部の content provider は size が取れない (ストリーミング系)。
+                // 一旦小さめのバッファでループ読みする。
+                std::vector<uint8_t> buf;
+                buf.reserve(64 * 1024);
+                if (offset > 0) SDL_SeekIO(io, (Sint64)offset, SDL_IO_SEEK_SET);
+                uint8_t tmp[64 * 1024];
+                uint64_t remaining = length;
+                while (remaining > 0) {
+                    size_t toRead = (size_t)hs_min(static_cast<uint64_t>(sizeof(tmp)), remaining);
+                    size_t r = SDL_ReadIO(io, tmp, toRead);
+                    if (r == 0) break;
+                    buf.insert(buf.end(), tmp, tmp + r);
+                    remaining -= r;
+                }
+                SDL_CloseIO(io);
+                result.data = std::move(buf);
+                result.bytesRead = result.data.size();
+                result.success = true;
+                return result;
+            }
+            if ((uint64_t)offset >= (uint64_t)fileSize) { SDL_CloseIO(io); result.success = true; return result; }
+            if (offset > 0) SDL_SeekIO(io, (Sint64)offset, SDL_IO_SEEK_SET);
+            uint64_t remaining = hs_min(length, (uint64_t)fileSize - offset);
+            result.data.resize(static_cast<size_t>(remaining));
+            size_t r = SDL_ReadIO(io, result.data.data(), result.data.size());
+            SDL_CloseIO(io);
+            result.bytesRead = r;
+            result.data.resize(static_cast<size_t>(r));
+            result.success = true;
+            return result;
+        }
+#endif
         std::ifstream file(osPath, std::ios::binary);
         if (!file) { result.error = "Failed to open file: " + osPath; return result; }
 
@@ -1156,6 +1223,12 @@ public:
             config.cacheDir = ".\\HopStarBB\\Cache";
             config.metadataDbPath = ".\\HopStarBB\\metadata.db";
         }
+#elif defined(__ANDROID__)
+        // Android: cache は外部の cache dir、metadata は internal storage に。
+        const char* androidCache    = SDL_GetAndroidExternalStoragePath();
+        const char* androidInternal = SDL_GetAndroidInternalStoragePath();
+        config.cacheDir       = androidCache    ? std::string(androidCache)    + "/cache"        : "/data/local/tmp/hopstarbb/cache";
+        config.metadataDbPath = androidInternal ? std::string(androidInternal) + "/metadata.db" : "/data/local/tmp/hopstarbb/metadata.db";
 #else
         const char* home = getenv("HOME");
         if (home) {

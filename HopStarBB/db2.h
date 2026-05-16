@@ -4,6 +4,7 @@
  =====================================================================*/
 #pragma once
 
+#include <SDL3/SDL_log.h>
 #include <memory>
 namespace std {
 template<class T, class... Args>
@@ -152,11 +153,14 @@ private:
                 else if (j.kind == Job::Commit)   exec_simple("COMMIT;");
                 else                              exec_simple("ROLLBACK;");
             }
-            catch (...) { if (j.eptr) *j.eptr = std::current_exception(); }
-
-            /*if (j.kind != Job::Exec) {
-                if (j.busy_flag) j.busy_flag->store(false, std::memory_order_release);
-            }*/
+            catch (std::exception& e) {
+                SDL_Log("[SqlWorker] exception: %s", e.what());
+                if (j.eptr) *j.eptr = std::current_exception();
+            }
+            catch (...) {
+                SDL_Log("[SqlWorker] unknown exception");
+                if (j.eptr) *j.eptr = std::current_exception();
+            }
             j.queue->push(j.h);      // <- ここで Awaiter を再開
         }
     }

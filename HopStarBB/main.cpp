@@ -1,6 +1,11 @@
 ﻿#define _CRT_SECURE_NO_WARNINGS
+
+// =============================================================================
+// Platform-specific heavy deps (Windows: PyTorch / ONNX / FFmpeg / Win32 API)
+// Android 版は別途 jniLibs に配置した同等ライブラリを順次有効化していく。
+// =============================================================================
+#ifdef _WIN32
 #include <torch/torch.h>
-#include <iostream>
 #include <windows.h>
 #undef max
 #undef min
@@ -12,7 +17,11 @@ extern "C" {
     #include <libavdevice/avdevice.h>
     #include <libswresample/swresample.h>
 }
+#endif
+
+#include <iostream>
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>          // SDL3 のエントリポイントマクロ (Android では必須)
 #include <SDL3_ttf/SDL_ttf.h>
 #include <bx/math.h>
 #include <bgfx/bgfx.h>
@@ -21,17 +30,29 @@ extern "C" {
 #include "stb_image_write.h"
 #include "threed.h"
 #include <cstdint>
+
+#ifdef _WIN32
 #include "miniaudio.h"
+#endif
+
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_IMPLEMENTATION
+
+#ifdef _WIN32
 #define UTF8PROC_STATIC
 #include <utf8proc.h>
 #pragma comment(lib, "utf8proc_static.lib")
 #include <dwmapi.h>
 #pragma comment(lib, "dwmapi.lib")
+#endif
+
 #include "file_engine.h"
+
+#ifdef _WIN32
 #include "lldbdriver.h"   // RunLldbDriverMode 用 (= --lldb-driver 早期分岐で呼ぶ)
 namespace F = torch::nn::functional;
+#endif
+
 #include "gc.h"
 #include "arr.h"
 #include "db2.h"
@@ -39,8 +60,16 @@ namespace F = torch::nn::functional;
 #include <portaudio.h>   // audio.h より前にグローバルに入れる (audio.h は namespace nle 内で再 include するためヘッダガードでスキップ → 型は global に存在することになる)
 #include "audio.h"
 #include "elem.h"
+
+#ifdef __ANDROID__
+#include <thread>
+#include <chrono>
+#endif
+
+#ifdef _WIN32
 bool cuda = false;
 HMODULE torch_cuda_dll;
+#endif
 
 // ============================================================================
 // Global FileEngine instance
@@ -164,6 +193,7 @@ hit_test_cb(SDL_Window* win, const SDL_Point* pt, void* data)
     // その他の領域は通常のクライアント領域として扱う
     return SDL_HITTEST_NORMAL;
 }
+#ifdef _WIN32
 struct SimpleCNNImpl : torch::nn::Module {
 public:
     torch::nn::Sequential net;
@@ -206,7 +236,9 @@ size_t utf32_to_utf16(const utf8proc_int32_t* utf32, size_t len, uint16_t* utf16
     }
     return j;
 }
+#endif // _WIN32
 int main(int argc, char** argv) {
+#ifdef _WIN32
     // === driver mode 早期分岐 (C 案: double-init 回避) ===
     // 親 (= primary HopStarBB.exe) からの subprocess。SDL / bgfx を含む全 UI
     // 初期化を完全にスキップして、LLDB driver だけ走らせる。これで inferior
@@ -215,6 +247,11 @@ int main(int argc, char** argv) {
     if (argc >= 2 && strcmp(argv[1], "--lldb-driver") == 0) {
         return RunLldbDriverMode(argc, argv);
     }
+#endif
+
+#ifdef __ANDROID__
+    SDL_Log("=== HopStarBB Android Start ===");
+#endif
 
     // Initialize FileEngine (lazy init on first use)
     auto* fileEngine = getFileEngine();
@@ -305,23 +342,98 @@ int main(int argc, char** argv) {
             model->eval();
         }*/
 
-        // SDL3 �̏�����
+        // SDL3 の初期化
+#ifdef __ANDROID__
+        if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
+#else
         if (!SDL_Init(SDL_INIT_VIDEO)) {
+#endif
             fprintf(stderr, "SDL_Init Error: %s\n", SDL_GetError());
             return 1;
         }
         if (!TTF_Init()) {
             fprintf(stderr, "ttferror");
         }
-        // �E�B���h�E�̍쐬
+        // ウィンドウの作成
+#ifdef __ANDROID__
+        // SDL_WINDOW_FULLSCREEN を外す → immersive mode 解除 →
+        // システム UI (ホーム/バック) が表示される。代わりに UI 描画は safe area
+        // 内に閉じる (viewport offset + size を buildFrame で毎フレーム調整)。
+        SDL_Window* window = SDL_CreateWindow("HopStarBB", 0, 0,
+            SDL_WINDOW_VULKAN);
+#else
         SDL_Window* window = SDL_CreateWindow("SDL3 Example",
             1200, 800,
             SDL_WINDOW_BORDERLESS | SDL_WINDOW_RESIZABLE);
+#endif
         if (!window) {
             fprintf(stderr, "SDL_CreateWindow Error: %s\n", SDL_GetError());
             SDL_Quit();
             return 1;
         }
+
+#ifdef __ANDROID__
+        // Android: ANativeWindow の準備完了を待つ (= SHOWN/EXPOSED/DISPLAY_CHANGED)
+        {
+            bool windowReady = false;
+            int waitAttempts = 0;
+            const int maxWaitAttempts = 100;  // 10秒上限
+            while (!windowReady && waitAttempts < maxWaitAttempts) {
+                SDL_Event ev;
+                while (SDL_PollEvent(&ev)) {
+                    if (ev.type == SDL_EVENT_WINDOW_SHOWN ||
+                        ev.type == SDL_EVENT_WINDOW_EXPOSED ||
+                        ev.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED) {
+                        windowReady = true;
+                        break;
+                    }
+                    if (ev.type == SDL_EVENT_QUIT || ev.type == SDL_EVENT_TERMINATING) {
+                        SDL_DestroyWindow(window);
+                        SDL_Quit();
+                        return 0;
+                    }
+                }
+                if (!windowReady) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    waitAttempts++;
+                }
+            }
+            SDL_Log("Window ready=%d (attempts=%d)", windowReady ? 1 : 0, waitAttempts);
+
+            // ★ insets が安定するまでもう少しイベント pump する。
+            // SDL_EVENT_WINDOW_SAFE_AREA_CHANGED が届いたら break、または最大
+            // 30 回 (= 約 3 秒) で諦める。これにより最初の buildFrame が走る前に
+            // SDL の window->safe_rect が確定し、初フレームから safe area サイズで
+            // layout される。
+            {
+                SDL_Rect safe;
+                int safeAttempts = 0;
+                const int maxSafeAttempts = 30;
+                bool safeReady = false;
+                while (!safeReady && safeAttempts < maxSafeAttempts) {
+                    SDL_Event ev;
+                    while (SDL_PollEvent(&ev)) {
+                        if (ev.type == SDL_EVENT_WINDOW_SAFE_AREA_CHANGED) {
+                            safeReady = true;
+                        }
+                    }
+                    if (SDL_GetWindowSafeArea(window, &safe) && safe.w > 0 && safe.h > 0) {
+                        int fw = 0, fh = 0;
+                        SDL_GetWindowSize(window, &fw, &fh);
+                        if (safe.x != 0 || safe.y != 0 || safe.w != fw || safe.h != fh) {
+                            // 実 inset が反映された (= safe rect が full size と違う) → 確定
+                            safeReady = true;
+                        }
+                    }
+                    if (!safeReady) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        safeAttempts++;
+                    }
+                }
+                SDL_Log("[Android] safe area settled (attempts=%d)", safeAttempts);
+            }
+        }
+#endif
 
         
 
@@ -397,6 +509,36 @@ int main(int argc, char** argv) {
         }*/
 		int width, height;
         SDL_GetWindowSize(window, &width, &height);
+#ifdef __ANDROID__
+        // ★ Android: 初期 width/height は safe area サイズを使う (= ステータスバー /
+        //    ナビゲーションバー / cutout を除いた領域)。これにより、最初の
+        //    buildFrame が走る前から mainWin->size / mainLocal->size が safe area
+        //    サイズになり、初回 layout から正しいサイズで組まれる
+        //    (= 初フレーム描画が下に突き抜けない)。
+        //    safe area の anchor (x, y) は g_backbufferViewOffsetX/Y で viewport
+        //    offset として適用される (buildFrame で毎フレーム同期)。
+        {
+            SDL_Rect safe;
+            if (SDL_GetWindowSafeArea(window, &safe) && safe.w > 0 && safe.h > 0) {
+                SDL_Log("[Android-init] window=%dx%d safe=(%d,%d %dx%d)",
+                        width, height, safe.x, safe.y, safe.w, safe.h);
+                width = safe.w;
+                height = safe.h;
+            } else {
+                SDL_Log("[Android-init] safe area not available, using window size %dx%d",
+                        width, height);
+            }
+        }
+#endif
+        // 端末の content scale を UI / フォントサイズに反映。
+        // SDL3 は high-DPI ディスプレイで 2.0 / Android 420dpi で 2.625 等を返す。
+        // この時点で SDL_GetWindowDisplayScale は実ディスプレイに紐づき有効。
+        {
+            float dispScale = SDL_GetWindowDisplayScale(window);
+            if (dispScale <= 0.0f) dispScale = 1.0f;
+            SetUiScale(dispScale);
+            SDL_Log("UI scale = %f (window %dx%d)", dispScale, width, height);
+        }
         bool isDragging = false;
         int lastMouseX = 0, lastMouseY = 0;
         std::chrono::high_resolution_clock::time_point lastTime_ = std::chrono::high_resolution_clock::now();
@@ -406,8 +548,12 @@ int main(int argc, char** argv) {
         hoppy->mainGC->hoppy = hoppy;
         registerGCClasses(hoppy->mainGC);
 		magc->hoppy = hoppy;
-        // hit test に hoppy を渡す (= タブ領域でウィンドウドラッグ移動を有効化)
+#ifndef __ANDROID__
+        // hit test に hoppy を渡す (= タブ領域でウィンドウドラッグ移動を有効化)。
+        // Android にはウィンドウドラッグ概念がないので無効。
+        // Windows / Linux / macOS いずれもデスクトップ環境なので有効。
         SDL_SetWindowHitTest(window, hit_test_cb, hoppy);
+#endif
 
         NativeWindow* mainWin = new NativeWindow();
         mainWin->sdlWindow = window;
@@ -415,7 +561,15 @@ int main(int argc, char** argv) {
         mainWin->viewId = hoppy->basicViewId++;
         mainWin->type = WindowType_Main;
         auto mainProps = SDL_GetWindowProperties(window);
+#ifdef _WIN32
         mainWin->nwh = SDL_GetPointerProperty(mainProps, "SDL.window.win32.hwnd", nullptr);
+#elif defined(__ANDROID__)
+        mainWin->nwh = SDL_GetPointerProperty(mainProps, SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr);
+        SDL_Log("ANativeWindow nwh=%p", mainWin->nwh);
+#else
+        // Linux/macOS は今のところ未対応。必要なら X11/Wayland/Cocoa の SDL property を分岐追加。
+        mainWin->nwh = nullptr;
+#endif
         hoppy->mainGC->windows.push_back(mainWin);
 
         // mainGCのLocal初期化
@@ -448,7 +602,7 @@ int main(int argc, char** argv) {
         setPercentX(tab, 1.0, 0);
         tab->font = getFont("sans", 16);
         NewDirectAddLast(thgc, local, elem, tab);
-        int height2 = 24;
+        int height2 = Sc(24);
         NewElement* toolline = (NewElement*)GC_alloc(thgc, CType::_ElementC);
         initElement(thgc, toolline);
         toolline->orient = true;
@@ -474,7 +628,7 @@ int main(int argc, char** argv) {
         im2->size.y = height2;
         NewElementAddLast(thgc, local, toolline, im2);
         NewDrop* drop = (NewDrop*)GC_alloc(thgc, CType::_DropC);
-        drop->size.y = height2; drop->size.x = 120;
+        drop->size.y = height2; drop->size.x = Sc(120);
         PopupWindow* pw = (PopupWindow*)GC_alloc(thgc, CType::_PopupC);
         pw->font = getFont("sans", 16);
         initPopup(thgc, local, pw, PopupAnchor::Anchor_Element, drop, 3, 0, 2);
@@ -491,7 +645,9 @@ int main(int argc, char** argv) {
         let1->color = 0x000000FF;
         NewDirectAddLast(thgc, local, down1, let1);
         NewDown* down2 = (NewDown*)GC_alloc(thgc, CType::_DownC);
-        String* str2 = (String*)createString(thgc, (char*)L"あいうえお", 5, 2);
+        // ★ u"..." (char16_t = 2 byte 固定) で書く。L"..." は wchar_t で
+        //   Windows は 2 byte、Android/Linux は 4 byte なので esize=2 と齟齬が出る。
+        String* str2 = (String*)createString(thgc, (char*)u"あいうえお", 5, 2);
         initDown(thgc, down2);
         NewDirectAddLast(thgc, local, pw, down2);
         reinitDown(thgc, down2, str2);
@@ -522,10 +678,21 @@ int main(int argc, char** argv) {
 
 		hoppy->mainLocal->offscreen->markLayout(hoppy->mainLocal, hoppy->mainLocal);
 
-        // リサイズ中（モーダルループ中）もリアルタイムで処理するためのイベントウォッチャー
+        // リサイズ + Android lifecycle 用イベント watcher。
+        // SDL3 は WILL_ENTER_BACKGROUND / DID_ENTER_FOREGROUND を
+        // Java onPause / onResume の同期コールバック上で fire してくれるが、
+        // SDL_PollEvent 経由だと処理が遅れて SurfaceView 破棄に間に合わず、
+        // bgfx swapchain が dead nwh を掴んだまま再開して画面が止まる。
+        // ここで同期的に render->pause() を呼んで Java onPause を blocking、
+        // 安全に Android に surface 破棄させる。
+        struct EventWatchCtx { HopStar* hoppy; RenderThread* render; };
+        static EventWatchCtx s_eventWatchCtx;
+        s_eventWatchCtx.hoppy = hoppy;
+        s_eventWatchCtx.render = nullptr;
         SDL_AddEventWatch([](void* userdata, SDL_Event* event) -> bool {
+            EventWatchCtx* ctx = (EventWatchCtx*)userdata;
             if (event->type == SDL_EVENT_WINDOW_RESIZED) {
-                HopStar* hoppy = (HopStar*)userdata;
+                HopStar* hoppy = ctx->hoppy;
                 NativeWindow* nw = hoppy->findWindowBySDLId(event->window.windowID);
                 if (nw) {
                     int newW = (int)event->window.data1;
@@ -537,11 +704,33 @@ int main(int argc, char** argv) {
                     wr.coro = {};
                 }
             }
+#if defined(__ANDROID__)
+            // WILL_ENTER_BACKGROUND / DID_ENTER_FOREGROUND + FOCUS_LOST / FOCUS_GAINED
+            // の両方で検知する。File dialog 起動経路は端末によって WILL_ENTER_BACKGROUND が
+            // 来ないので FOCUS_LOST を保険として入れる。
+            // pause/resume が重複して呼ばれてもよいように冪等にする (内部で paused_ flag を
+            // セット/リセットするだけなので既に冪等)。
+            else if (event->type == SDL_EVENT_WILL_ENTER_BACKGROUND ||
+                     event->type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+                SDL_Log("[EventWatch] pause-trigger type=%u", (unsigned)event->type);
+                bgfx::PlatformData pdNull;
+                memset(&pdNull, 0, sizeof(pdNull));
+                pdNull.nwh = nullptr;
+                bgfx::setPlatformData(pdNull);
+                if (ctx->render) ctx->render->pauseAndWait();
+            }
+            else if (event->type == SDL_EVENT_DID_ENTER_FOREGROUND ||
+                     event->type == SDL_EVENT_WINDOW_FOCUS_GAINED) {
+                SDL_Log("[EventWatch] resume-trigger type=%u", (unsigned)event->type);
+                if (ctx->render) ctx->render->resume();
+            }
+#endif
             return true;
-        }, hoppy);
+        }, &s_eventWatchCtx);
 
         RenderThread* render = new RenderThread(hoppy, window);
         render->start();
+        s_eventWatchCtx.render = render;
 		runGoThreadAsync(magc);
         while (running) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -613,6 +802,7 @@ int main(int argc, char** argv) {
                     KeyEvent e = KeyEvent();
                     e.key = -1;
                     String* str = (String*)GC_alloc(hoppy->target, _String);
+#ifdef _WIN32
                     utf8proc_int32_t utf32Buf[256];
 					utf8proc_ssize_t utf32len = utf8proc_decompose((const utf8proc_uint8_t*)text, -1, utf32Buf, 256, UTF8PROC_NULLTERM);
                     if (utf32len < 0) {
@@ -623,6 +813,14 @@ int main(int argc, char** argv) {
                     uint16_t utf16Buf[512];
                     size_t utf16len = utf32_to_utf16(utf32Buf, (size_t)utf32len, utf16Buf);
                     str = createString(hoppy->target, (char*)utf16Buf, utf16len, 2);
+#else
+                    // Android/その他: utf8proc 未リンク。SDL3 が UTF-8 を渡してくるので
+                    // 一旦そのまま UTF-8 で渡す (= encoding=1)。
+                    // TODO: createString に渡す encoding 引数が UTF-16 専用なら、
+                    // 将来 utf8proc を Android NDK ビルドに追加して同じパスにする。
+                    size_t txtlen = strlen(text);
+                    str = createString(hoppy->target, (char*)text, txtlen, 1);
+#endif
                     e.text = str;
                     if (isPopup) {
                         auto ke = PopupKeyButton(hoppy, targetNw, &e);
@@ -637,10 +835,79 @@ int main(int argc, char** argv) {
 				else if (event.type == SDL_EVENT_QUIT) {
 					running = 0;
                 }
+#ifdef __ANDROID__
+                else if (event.type == SDL_EVENT_TERMINATING) {
+                    SDL_Log("SDL_EVENT_TERMINATING");
+                    running = 0;
+                }
+                else if (event.type == SDL_EVENT_LOW_MEMORY) {
+                    SDL_Log("SDL_EVENT_LOW_MEMORY");
+                    // TODO: free non-essential resources (テクスチャキャッシュ等)
+                }
+                else if (event.type == SDL_EVENT_WILL_ENTER_BACKGROUND) {
+                    SDL_Log("SDL_EVENT_WILL_ENTER_BACKGROUND");
+                    // Pause render before Android destroys SurfaceView; otherwise
+                    // bgfx (vulkan) hits vkCreateAndroidSurfaceKHR with a freed
+                    // ANativeWindow* and SEGVs in libutils RefBase::incStrong on
+                    // the swapchain recreate path.
+                    if (render) render->pause();
+                }
+                else if (event.type == SDL_EVENT_DID_ENTER_BACKGROUND) {
+                    SDL_Log("SDL_EVENT_DID_ENTER_BACKGROUND");
+                }
+                else if (event.type == SDL_EVENT_WILL_ENTER_FOREGROUND) {
+                    SDL_Log("SDL_EVENT_WILL_ENTER_FOREGROUND");
+                }
+                else if (event.type == SDL_EVENT_DID_ENTER_FOREGROUND) {
+                    SDL_Log("SDL_EVENT_DID_ENTER_FOREGROUND");
+                    // SDL has a new ANativeWindow now; render thread refreshes
+                    // bgfx::setPlatformData() before its next reset.
+                    if (render) render->resume();
+                }
+                else if (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
+                         event.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED) {
+                    SDL_Log("Surface display/pixel-size change (%d)", event.type);
+                    if (hoppy && hoppy->mainGC && !hoppy->mainGC->windows.empty()) {
+                        NativeWindow* mn = hoppy->mainGC->windows[0];
+                        int w = 0, h = 0;
+                        SDL_GetWindowSize(window, &w, &h);
+                        if (w > 0 && h > 0 && mn) {
+                            mn->size = { w, h };
+                            mn->needsFboReset = true;
+                            {
+                                std::lock_guard<std::mutex> lk(hoppy->m);
+                                hoppy->render++;
+                            }
+                            hoppy->cv_.notify_all();
+                        }
+                    }
+                }
+                else if (event.type == SDL_EVENT_WINDOW_DESTROYED) {
+                    SDL_Log("SDL_EVENT_WINDOW_DESTROYED");
+                    running = 0;
+                }
+#endif
                 else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+                    float tapX = (float)event.button.x;
+                    float tapY = (float)event.button.y;
+#ifdef __ANDROID__
+                    // Android: touch 座標は raw SurfaceView 座標 (上 0 起点) で届くが、
+                    // UI レイアウトは safe area 内座標 (上のステータスバー分シフト済み)。
+                    // viewport offset (= g_backbufferViewOffsetX/Y) を引いて UI 座標に合わせる。
+                    extern int g_backbufferViewOffsetX;
+                    extern int g_backbufferViewOffsetY;
+                    tapX -= (float)g_backbufferViewOffsetX;
+                    tapY -= (float)g_backbufferViewOffsetY;
+#endif
+                    if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+                        SDL_Log("[Tap] DOWN raw=(%.0f,%.0f) ui=(%.0f,%.0f) winId=%u isPopup=%d targetNw=%p",
+                                (float)event.button.x, (float)event.button.y,
+                                tapX, tapY,
+                                (unsigned)event.button.windowID, (int)isPopup, (void*)targetNw);
+                    }
                     MouseEvent* e = new MouseEvent();
-					e->x = event.button.x;
-                    e->y = event.button.y;
+					e->x = tapX;
+                    e->y = tapY;
                     e->action = event.type;
                     e->window = targetNw;
                     if (isPopup) {
@@ -655,9 +922,17 @@ int main(int argc, char** argv) {
                     }
                 }
                 else if (event.type == SDL_EVENT_MOUSE_MOTION) {
+                    float mvX = event.motion.x;
+                    float mvY = event.motion.y;
+#ifdef __ANDROID__
+                    extern int g_backbufferViewOffsetX;
+                    extern int g_backbufferViewOffsetY;
+                    mvX -= (float)g_backbufferViewOffsetX;
+                    mvY -= (float)g_backbufferViewOffsetY;
+#endif
                     MouseEvent* e = new MouseEvent();
-                    e->x = event.motion.x;
-                    e->y = event.motion.y;
+                    e->x = mvX;
+                    e->y = mvY;
                     e->window = targetNw;
                     SDL_MouseButtonFlags s = event.motion.state;
 
@@ -717,6 +992,7 @@ int main(int argc, char** argv) {
                         }
                         if (sdlWin) {
                             auto props = SDL_GetWindowProperties(sdlWin);
+#ifdef _WIN32
                             req->resultNwh = SDL_GetPointerProperty(props, "SDL.window.win32.hwnd", nullptr);
                             // 角丸設定（Windows 11 DWM）
                             if (req->resultNwh && req->cornerRound > 0) {
@@ -724,6 +1000,11 @@ int main(int argc, char** argv) {
                                 DwmSetWindowAttribute((HWND)req->resultNwh,
                                     33 /*DWMWA_WINDOW_CORNER_PREFERENCE*/, &pref, sizeof(pref));
                             }
+#elif defined(__ANDROID__)
+                            req->resultNwh = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr);
+#else
+                            req->resultNwh = nullptr;
+#endif
                             if (req->visible) SDL_ShowWindow(sdlWin);
                         }
                         req->resultSDLWindow = sdlWin;
@@ -760,16 +1041,17 @@ int main(int argc, char** argv) {
             }
         }
 
-        // ���݂̃f�o�C�X���擾����ʂ̕��@
-        c10::DeviceIndex device_idx = 0; // �f�t�H���g��0�Ԗڂ�GPU���g�p
+#ifdef _WIN32
+        // 現在のデバイスを取得する別の方法
+        c10::DeviceIndex device_idx = 0; // デフォルトの0番目のGPUを使用
         torch::Device device(torch::kCUDA, device_idx);
         std::cout << "Using CUDA device: " << device_idx << std::endl;
 
-        // CPU�e���\�����쐬���Ă���CUDA�ɓ]���i�i�K�I�Ɋm�F�j
+        // CPUテンソルを作成してからCUDAに転送（段階的に確認）
         torch::Tensor cpu_tensor = torch::rand({ 3, 4 });
         std::cout << "CPU Tensor created successfully" << std::endl;
 
-        // �����I�ȃf�o�C�X�w���GPU�ɓ]��
+        // 明示的なデバイス指定でGPUに転送
         torch::Tensor cuda_tensor = cpu_tensor.to(device);
         std::cout << "Tensor transferred to CUDA successfully" << std::endl;
 
@@ -805,6 +1087,7 @@ int main(int argc, char** argv) {
         }
         OrtAllocator* allocator;
         ort->GetAllocatorWithDefaultOptions(&allocator);
+#endif // _WIN32 (PyTorch + ONNX Runtime block)
 
 
 
@@ -813,9 +1096,11 @@ int main(int argc, char** argv) {
         }*/
 
     }
+#ifdef _WIN32
     catch (const c10::Error& e) {
         std::cerr << "LibTorch Error: " << e.what() << std::endl;
     }
+#endif
     catch (const std::exception& e) {
         std::cerr << "Standard Exception: " << e.what() << std::endl;
     }

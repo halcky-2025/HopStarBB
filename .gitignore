@@ -361,12 +361,12 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
-# Android
-android/local.properties
-android/.gradle/
-android/app/build/
-android/app/.cxx/
-android/build/
+# Android (paths after the move: android/ lives under HopStarBB/)
+HopStarBB/android/local.properties
+HopStarBB/android/.gradle/
+HopStarBB/android/app/build/
+HopStarBB/android/app/.cxx/
+HopStarBB/android/build/
 *.apk
 *.aab
 
@@ -381,7 +381,7 @@ android/build/
 
 # Toolchains / large 3rd-party (not source)
 clang3/
-android/app/jni/src/bgfx/
+HopStarBB/android/app/jni/src/bgfx/
 
 # Claude Code local state
 .claude/

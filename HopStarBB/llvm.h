@@ -2608,7 +2608,10 @@ void llvm_output(ThreadGC* thgc, LLLVM* llvm, SB* sb) {
 // ============================================================
 // clang/lld でコンパイルし clang3/<name>.dll を生成する。
 // 戻り値: true = 正常終了 (DLL が生成された)、false = ll 出力失敗 / clang エラー
+// 注: Android では clang3/ 同梱バイナリも DLL ローディングもサポートしないため、
+//     関数本体は Windows のみ。他プラットフォームでは false を返すスタブ。
 bool llvm_compile(ThreadGC* thgc, LLLVM* llvm, const char* name) {
+#ifdef _WIN32
     char path[512];
     snprintf(path, sizeof(path), "clang3/%s.ll", name);
     FILE* f = fopen(path, "w");
@@ -2636,6 +2639,12 @@ bool llvm_compile(ThreadGC* thgc, LLLVM* llvm, const char* name) {
         return false;
     }
     return true;
+#else
+    (void)thgc;
+    (void)llvm;
+    (void)name;
+    return false;  // JIT compile via clang3 + DLL is Windows-only
+#endif
 }
 
 // ============================================================

@@ -57,19 +57,16 @@ public:
     // 直前 publish() を consumer が acquire するまで待つ。
     //   caller は publish() → render++/notify_one → waitAcquired() の順で呼ぶ。
     //   notify_one 済み + consumer alive なら必ず acquireCount が追いついて exit する。
-    //   consumer 死亡時の保険として max yield 数 + 強制整合 fallback を入れる。
+    //
+    // 注意: 旧実装は maxSpins=1M で timeout して acquireCount を強制整合させてたが、
+    // 起動時 race (consumer の bgfx init が遅い + producer が先に publish) で初回 slot を
+    // 黙って捨てる原因になっていた。consumer は paused_ 経路で明示的に止まる以外は必ず
+    // 動いているはずなので、ここは無限 spin で待つ。consumer が死んで戻ってこない事態は
+    // app 自体が詰みなので timeout で繕う意味はない。
     void waitAcquired() {
-        const int maxSpins = 1000000;   // 適当な大きさで永久 spin 防止
-        int spins = 0;
         while (publishCount_.load(std::memory_order_acquire)
                > acquireCount_.load(std::memory_order_acquire)) {
             std::this_thread::yield();
-            if (++spins > maxSpins) {
-                // consumer 復旧不能 → 諦めて整合だけ取る (= 古い slot は失われる)
-                acquireCount_.store(publishCount_.load(std::memory_order_acquire),
-                                    std::memory_order_release);
-                break;
-            }
         }
     }
 
@@ -626,6 +623,15 @@ bool initBgfx(SDL_Window* window) {
     SDL_GetWindowSize(window, &width, &height);
     SDL_Log("initBgfx: Android nwh=%p, size=%dx%d", nwh, width, height);
 
+    // Force single-threaded bgfx (no internal render thread).
+    // Reason: in multi-threaded mode, bgfx's render thread calls
+    // vkQueuePresentKHR which can return OUT_OF_DATE the instant Android
+    // destroys the SurfaceView; bgfx then auto-recreates the swapchain via
+    // vkCreateAndroidSurfaceKHR using its cached ANativeWindow pointer,
+    // which is now freed -> SEGV. Single-threaded keeps GPU work synchronous
+    // with our render-thread pause hook so we never touch a dead surface.
+    bgfx::renderFrame();
+
 #elif defined(_WIN32)
     void* hwnd = SDL_GetPointerProperty(props, "SDL.window.win32.hwnd", nullptr);
     pd.nwh = hwnd;
@@ -734,7 +740,22 @@ bool initBgfx(SDL_Window* window) {
 #if defined(__linux__) && !defined(__ANDROID__)
     init.resolution.formatDepthStencil = bgfx::TextureFormat::D24S8;  // Enable depth buffer (Desktop Linux bgfx only)
 #endif
+#if defined(__ANDROID__)
+    // Force RGBA8 backbuffer. bgfx defaults to BGRA8 on Android, but Adreno
+    // reports BGRA8 does not have the BACKBUFFER cap bit, so the Vulkan
+    // swapchain is created but never composites to the visible SurfaceView
+    // (screen stays at the SurfaceView default = black, no stats overlay).
+    init.resolution.formatColor = bgfx::TextureFormat::RGBA8;
+#endif
+#if defined(__ANDROID__)
+    // Android debug build asserts on BGRA8 backbuffer cap check in
+    // bgfx::Context::reset (some Adreno/Mali drivers report no BACKBUFFER
+    // bit for BGRA8 even though init accepts it). Keep production-style
+    // logging off here.
+    init.debug = false;
+#else
     init.debug = true;  // デバッグ情報を有効
+#endif
 
     fprintf(stderr, "[BGFX] >>> calling bgfx::init  type=%d  res=%ux%u  reset=0x%x  pd.nwh=%p\n",
         (int)init.type, init.resolution.width, init.resolution.height,
@@ -1068,14 +1089,23 @@ public:
         }
     }
     void buildFrame(ThreadGC* thgc, uint64_t frameId) {
-        if (invalidate == 0) {
-            return;
-        }
         // publish() で wait する前に必ず unlock する必要があるため unique_lock。
         // (= render thread が m を取れずに acquire 出来ない deadlock を防ぐ)
         std::unique_lock<std::mutex> lock2(m);
-        if (target != thgc) return;
+        if (target != thgc) return;   // multi-thread guard
+        // mainGC->queue は invalidate に関係なく毎フレーム drain する: LoadFileAsync
+        // の完了 handle / state replay の co_yield 後の resume 等が mainGC->queue 経由で
+        // 待機していることがあり、ここを invalidate==0 で止めると永遠に処理されず、
+        // replay 後段の AddViewerToTab → tab 作成がフリーズする。
         mainGC->queue->resume_all();
+        // invalidate は「あと何フレーム build したいか」のカウンタとして使う。
+        // markLayout / markPaint / event handler 等で 2 (= kInvalidateFrames) を store、
+        // buildFrame では > 0 なら走らせて末尾で fetch_sub(1) → 2 → 1 → 0 と減衰する。
+        // 理由: render queue は double-buffer (前/後 2 slot) で読み書きが 1 フレーム
+        //   ずれることがあり、1 回 build だけでは consumer が古い slot を pick して
+        //   新コマンドを使えないフレームが出る。連続 2 回 build で両 slot に行き渡る。
+        int wantBuild = invalidate.load(std::memory_order_acquire);
+        if (wantBuild == 0 && thgc->animQueue->empty() && mainGC->animQueue->empty()) return;
         auto* q = target->commandQueue;
 
         auto currentTime = std::chrono::steady_clock::now();
@@ -1123,7 +1153,65 @@ public:
             if (target->animQueue && target->animQueue != mainGC->animQueue) target->animQueue->resume_all();
             q->begin(frameId, 1024);
             ::viewId = 0;  // フレーム開始時に論理viewIdカウンタをリセット（オフスクリーン用: 小さい値から）
-            auto& layer = q->setCurrentSlotLayer({}, 1.0f, true, true, 1200, 800);
+            // Layer サイズは実ウィンドウサイズに合わせる (デスクトップでも端末でも
+            // フル画面に UI を広げる)。優先順位:
+            //   1. mainWin->size (resize watcher 等で更新済みの値)
+            //   2. SDL_GetWindowSize (size が未設定 / 0 の場合のリアルタイム問い合わせ)
+            //   3. 1200x800 の最終フォールバック
+            int layerW = 0, layerH = 0;
+            if (!mainGC->windows.empty() && mainGC->windows[0]) {
+                NativeWindow* mw = mainGC->windows[0];
+#if defined(__ANDROID__)
+                // Android: safe area (= ステータスバー / ナビゲーションバー /
+                // cutout を除いた領域) を毎フレーム取得し:
+                //   - mw->size を safe area サイズに同期 (= layout が safe area 内で組まれる)
+                //   - g_backbufferViewOffsetX/Y に safe area の (x, y) を保存
+                //     (= bgfx viewport を safe area 位置にオフセットし、UI が
+                //      システム UI 領域に被って描かれないようにする)
+                //   - サイズ変化を検知したら mainLocal を re-layout (= insets が非同期で
+                //     後から届いたときに最初のフレームから誤サイズ固着しないように)
+                if (mw->sdlWindow) {
+                    int fullW = 0, fullH = 0;
+                    SDL_GetWindowSize(mw->sdlWindow, &fullW, &fullH);
+                    SDL_Rect safe = { 0, 0, fullW, fullH };
+                    bool ok = SDL_GetWindowSafeArea(mw->sdlWindow, &safe);
+                    if (!ok || safe.w <= 0 || safe.h <= 0) {
+                        safe.x = safe.y = 0; safe.w = fullW; safe.h = fullH;
+                    }
+                    int newW = safe.w, newH = safe.h;
+                    static int s_logged = 0;
+                    if (s_logged < 5 || mw->size.x != newW || mw->size.y != newH) {
+                        SDL_Log("[SafeArea] frame=%llu full=%dx%d safe=(%d,%d %dx%d) ok=%d mw->size=%dx%d",
+                                (unsigned long long)frameId, fullW, fullH,
+                                safe.x, safe.y, safe.w, safe.h, (int)ok,
+                                mw->size.x, mw->size.y);
+                        ++s_logged;
+                    }
+                    if (mw->size.x != newW || mw->size.y != newH) {
+                        mw->size.x = newW;
+                        mw->size.y = newH;
+                        if (mainLocal->offscreen) {
+                            mainLocal->size.x = newW;
+                            mainLocal->size.y = newH;
+                            mainLocal->offscreen->markLayout(mainLocal, mainLocal);
+                        }
+                    }
+                    g_backbufferViewOffsetX = safe.x;
+                    g_backbufferViewOffsetY = safe.y;
+                }
+#endif
+                if (mw->size.x > 0) layerW = mw->size.x;
+                if (mw->size.y > 0) layerH = mw->size.y;
+                if ((layerW == 0 || layerH == 0) && mw->sdlWindow) {
+                    int w = 0, h = 0;
+                    SDL_GetWindowSize(mw->sdlWindow, &w, &h);
+                    if (layerW == 0 && w > 0) layerW = w;
+                    if (layerH == 0 && h > 0) layerH = h;
+                }
+            }
+            if (layerW <= 0) layerW = 1200;
+            if (layerH <= 0) layerH = 800;
+            auto& layer = q->setCurrentSlotLayer({}, 1.0f, true, true, layerW, layerH);
             // 離れたオフスクリーン用: ルートから到達できなかったもの（layout==trueのまま）をMeasure
             for (int i = 0; i < mainLocal->screens->size; i++) {
                 Offscreen* screen = (Offscreen*)*get_list(mainLocal->screens, i);
@@ -1141,33 +1229,62 @@ public:
                     screen->elem->Measure(target, (NewElement*)screen->elem, &measure, local, &order);
                 }
             }
+            // popup screen を描画するためのヘルパ。Android では popup を別 OS window に
+            // できないので、mainWin の FBO に高 zIndex でオーバーレイ描画する。
+            auto drawScreen = [&](Offscreen* screen, NewLocal* localPtr) {
+                bool isPopup = (screen->window && screen->window->type == WindowType_Popup);
+                if (isPopup) {
+                    static int s_lastVis = -1; static int s_lastPaint = -1;
+                    int curVis = screen->window->visible ? 1 : 0;
+                    int curPaint = (int)screen->paint;
+                    if (curVis != s_lastVis || curPaint != s_lastPaint) {
+                        SDL_Log("[drawScreen-Popup] paint=%d visible=%d size=%dx%d",
+                                curPaint, curVis,
+                                screen->window->size.x, screen->window->size.y);
+                        s_lastVis = curVis; s_lastPaint = curPaint;
+                    }
+                }
+                if (!(screen->paint != Offscreen::PaintNone && screen->window && screen->window->visible)) return;
+                NewGraphic graphic;
+                graphic.pos.x = 0; graphic.pos.y = 0;
+                graphic.size.x = screen->window->size.x; graphic.size.y = screen->window->size.y;
+                graphic.start.x = 0; graphic.start.y = 0;
+                graphic.end.x = screen->window->size.x; graphic.end.y = screen->window->size.y;
+                graphic.fb = &screen->window->fbo; graphic.viewId = screen->window->viewId;
+                graphic.viewId2 = ::viewId++; graphic.layer = &layer;
+                graphic.group = NULL; graphic.fbsize = &screen->window->size;
+                graphic.winFb = &screen->window->fbo; graphic.winFbsize = &screen->window->size;
+                graphic.winViewId = screen->window->viewId;
+                graphic.deltaTime = this->deltaTime;
+                graphic.paint = screen->paint;
+                graphic.zIndex = 0.0f;
+#if defined(__ANDROID__)
+                // Android: popup を mainWin の上にオーバーレイ描画。
+                //   - fb/fbsize は mainWin のものを使う (= main backbuffer に直接書く)
+                //   - zIndex は十分高い値 (= 通常 UI より前面に出る)
+                //   - popup の絶対位置 (anchor) は myCreatePopupWindow / myMoveWindow
+                //     で popup->pos に書き込まれている。drawScreen 側では触らない。
+                if (screen->window->type == WindowType_Popup && !mainGC->windows.empty()) {
+                    NativeWindow* mw = mainGC->windows[0];
+                    graphic.fb = &mw->fbo;
+                    graphic.fbsize = &mw->size;
+                    graphic.viewId = mw->viewId;
+                    graphic.winFb = &mw->fbo;
+                    graphic.winFbsize = &mw->size;
+                    graphic.winViewId = mw->viewId;
+                    graphic.zIndex = 30000.0f;  // 通常 UI (~12000) より前面
+                }
+#endif
+                screen->elem->Draw(target, (NewElement*)screen->elem, &graphic, localPtr, q);
+            };
+
             for (int i = 0; i < mainLocal->screens->size; i++) {
                 Offscreen* screen = (Offscreen*)*get_list(mainLocal->screens, i);
-                if (screen->paint != Offscreen::PaintNone && screen->window && screen->window->visible) {
-                    NewGraphic graphic;
-                    graphic.pos.x = 0; graphic.pos.y = 0; graphic.size.x = screen->window->size.x; graphic.size.y = screen->window->size.y;
-                    graphic.start.x = 0; graphic.start.y = 0; graphic.end.x = screen->window->size.x; graphic.end.y = screen->window->size.y;
-                    graphic.fb = &screen->window->fbo; graphic.viewId = screen->window->viewId; graphic.viewId2 = ::viewId++; graphic.layer = &layer;
-                    graphic.group = NULL; graphic.fbsize = &screen->window->size;
-                    graphic.winFb = &screen->window->fbo; graphic.winFbsize = &screen->window->size; graphic.winViewId = screen->window->viewId;
-                    graphic.deltaTime = this->deltaTime;
-                    graphic.paint = screen->paint;
-                    screen->elem->Draw(target, (NewElement*)screen->elem, &graphic, mainLocal, q);
-                }
+                drawScreen(screen, mainLocal);
             }
             for (int i = 0; i < local->screens->size; i++) {
                 Offscreen* screen = (Offscreen*)*get_list(local->screens, i);
-                if (screen->paint != Offscreen::PaintNone && screen->window && screen->window->visible) {
-                    NewGraphic graphic;
-                    graphic.pos.x = 0; graphic.pos.y = 0; graphic.size.x = screen->window->size.x; graphic.size.y = screen->window->size.y;
-                    graphic.start.x = 0; graphic.start.y = 0; graphic.end.x = screen->window->size.x; graphic.end.y = screen->window->size.y;
-                    graphic.fb = &screen->window->fbo; graphic.viewId = screen->window->viewId; graphic.viewId2 = ::viewId++; graphic.layer = &layer;
-                    graphic.group = NULL; graphic.fbsize = &screen->window->size;
-                    graphic.winFb = &screen->window->fbo; graphic.winFbsize = &screen->window->size; graphic.winViewId = screen->window->viewId;
-                    graphic.deltaTime = this->deltaTime;
-                    graphic.paint = screen->paint;
-                    screen->elem->Draw(target, (NewElement*)screen->elem, &graphic, local, q);
-                }
+                drawScreen(screen, local);
             }
             // Hover描画: 各要素のオフスクリーンのウィンドウに直接上書き
             auto drawHoverList = [&](List* hoveredList) {
@@ -1210,13 +1327,22 @@ public:
             lock2.unlock();
             q->publish();
             render.fetch_add(1, std::memory_order_release);
-            invalidate.store(1, std::memory_order_relaxed);
+            // invalidate を 1 つ減らす (= 2 → 1 → 0)。冒頭で読んだ wantBuild 分を
+            // 消費した、という意味。measure/paint 中に別 thread が立てた追加分は
+            // CAS-with-max で積み増しされるので race にならない。
+            //   負値になっても int は十分広いので clamp 不要。次の build 要求で
+            //   上書きされるまで負のまま (= buildFrame 冒頭の <= 0 で skip)。
+            invalidate.fetch_sub(1, std::memory_order_acq_rel);
             cv_.notify_one();
             q->waitAcquired();
         }
     }
     NewTabBar* tab;
-    std::atomic<int> invalidate{ 1 };
+    // 「あと何フレーム build したいか」のカウンタ。markLayout/markPaint や event
+    // handler で kInvalidateFrames 分積む、buildFrame ごとに 1 ずつ減らす。
+    // 連続 2 フレーム build しないとgalaxy fold 4でオフスクリーンテクスチャーの描画が間に合わず、画面に古いテクスチャーを描画してると思っているから。
+    static constexpr int kInvalidateFrames = 2;
+    std::atomic<int> invalidate{ kInvalidateFrames };
     bool update = true;
     float time = 0;
     float deltaTime = 0;
@@ -1226,7 +1352,14 @@ public:
 // HopStar の完全型定義が揃ったので、前方宣言したフリー関数をここで実装する。
 // othelem.h など HopStar の詳細を知らないファイルから呼べるように提供する。
 inline void HopStar_set_target(HopStar* hp, ThreadGC* thgc) {
-    if (hp) hp->set_target(thgc);
+    hp->set_target(thgc);
+}
+
+// newelem.h の markLayout / markPaint から呼ばれる。HopStar が前方宣言だけの
+// コンテキストでも次フレーム再 build を要求できるよう、ヘルパでラップ。
+// kInvalidateFrames 回連続で build させる (= double-buffer の両 slot を埋める)。
+inline void markHopStarInvalidate(ThreadGC* gc) {
+    if (gc && gc->hoppy) gc->hoppy->invalidate = HopStar::kInvalidateFrames;
 }
 
 int addPattern(ThreadGC* thgc, std::vector<float>& colors, std::vector<float>& widthes) {
@@ -1274,7 +1407,7 @@ Generator MouseMainButton(HopStar* hoppy, MouseEvent* mv) {
                     }
                     myHideWindow(thgc, nw);
                 }
-                hoppy->invalidate = 1;
+                hoppy->invalidate = HopStar::kInvalidateFrames;
             }
         };
         closePopups(hoppy->target);
@@ -1291,14 +1424,14 @@ Generator MouseMainButton(HopStar* hoppy, MouseEvent* mv) {
                 local->scrollDrag.elem = nullptr;
                 SDL_CaptureMouse(false);
             }
-            hoppy->invalidate = 1;
+            hoppy->invalidate = HopStar::kInvalidateFrames;
             delete mv;
             co_return (char*)0;
         }
         if (mv->action == SDL_EVENT_MOUSE_BUTTON_UP) {
             local->scrollDrag.elem = nullptr;
             SDL_CaptureMouse(false);
-            hoppy->invalidate = 1;
+            hoppy->invalidate = HopStar::kInvalidateFrames;
             delete mv;
             co_return (char*)0;
         }
@@ -1306,9 +1439,9 @@ Generator MouseMainButton(HopStar* hoppy, MouseEvent* mv) {
 
     // Hover処理: mainGCのhoveredListを初期化
     List* oldMainHovered = hoppy->mainGC->hoveredList;
-    hoppy->mainGC->hoveredList = create_list(hoppy->target, sizeof(NewElement*), CType::_ElementC);
+    hoppy->mainGC->hoveredList = create_list(hoppy->mainGC, sizeof(NewElement*), CType::_ElementC);
     List* oldMainHoveredSpan = hoppy->mainGC->hoveredSpanList;
-    hoppy->mainGC->hoveredSpanList = create_list(hoppy->target, sizeof(HoveredSpan*), CType::_HoveredSpan);
+    hoppy->mainGC->hoveredSpanList = create_list(hoppy->mainGC, sizeof(HoveredSpan*), CType::_HoveredSpan);
 
     // Hover処理: targetのhoveredListを初期化
     List* oldHovered = hoppy->target->hoveredList;
@@ -1363,7 +1496,7 @@ Generator MouseMainButton(HopStar* hoppy, MouseEvent* mv) {
         SDL_CaptureMouse(true);
     }
 
-    hoppy->invalidate = 1;
+    hoppy->invalidate = HopStar::kInvalidateFrames;
     delete mv;
     co_return (char*)0;
 
@@ -1373,7 +1506,7 @@ Generator KeyButton(HopStar* hoppy, KeyEvent* kv) {
     NewLocal* local = hoppy->target->local;
 	SelectKey(hoppy->target, local, kv);
     hoppy->update = true;
-    hoppy->invalidate = 1;
+    hoppy->invalidate = HopStar::kInvalidateFrames;
     co_return (char*)0;
 }
 // ポップアップ用マウスイベント
@@ -1408,7 +1541,7 @@ Generator PopupMouseButton(HopStar* hoppy, NativeWindow* nw, MouseEvent* mv) {
         // Popup HoveredSpan Enter/Leave判定
         spanEnterLeave(oldHoveredSpan, hoppy->target->hoveredSpanList);
 
-        hoppy->invalidate = 1;
+        hoppy->invalidate = HopStar::kInvalidateFrames;
     }
     delete mv;
     co_return (char*)0;
@@ -1419,7 +1552,7 @@ Generator PopupKeyButton(HopStar* hoppy, NativeWindow* nw, KeyEvent* kv) {
         NewLocal* local = hoppy->target->local;
         SelectKey(hoppy->target, local, kv);
         hoppy->update = true;
-        hoppy->invalidate = 1;
+        hoppy->invalidate = HopStar::kInvalidateFrames;
     }
     co_return (char*)0;
 }
@@ -1463,11 +1596,49 @@ public:
 
     void stop() {
         running_ = false;
+        {
+            std::lock_guard<std::mutex> lk(pauseMutex_);
+            paused_ = false;
+        }
+        pauseCv_.notify_all();
 #if !(TARGET_OS_IOS || TARGET_OS_SIMULATOR)
         if (thread_.joinable()) {
             thread_.join();
         }
 #endif
+    }
+
+    // Android lifecycle: surface is destroyed when activity goes to background.
+    // Pause the render loop so we don't call bgfx::reset / frame with a stale nwh.
+    void pause() {
+        paused_ = true;
+        SDL_Log("RenderThread::pause()");
+    }
+
+    // Synchronous pause: blocks until the render thread parks on pauseCv_.
+    // Must be used from the SDL onPause path (Android UI thread) so the
+    // surface is not destroyed while we're mid bgfx::frame().
+    void pauseAndWait() {
+        paused_ = true;
+        SDL_Log("RenderThread::pauseAndWait() - blocking until render idles");
+        std::unique_lock<std::mutex> lk(pauseMutex_);
+        ackCv_.wait_for(lk, std::chrono::seconds(2),
+                        [this]{ return rendererIdle_.load() || !running_; });
+        SDL_Log("RenderThread::pauseAndWait() - done (idle=%d)", (int)rendererIdle_.load());
+    }
+
+    // On foreground, SDL has a new ANativeWindow pointer. Refresh bgfx
+    // PlatformData before the render loop touches the swapchain again, otherwise
+    // bgfx's vk swapchain recreate path will call vkCreateAndroidSurfaceKHR with
+    // a stale pointer and SEGV in libutils RefBase::incStrong.
+    void resume() {
+        {
+            std::lock_guard<std::mutex> lk(pauseMutex_);
+            needsPlatformDataRefresh_ = true;
+            paused_ = false;
+        }
+        pauseCv_.notify_all();
+        SDL_Log("RenderThread::resume() (will refresh bgfx platform data)");
     }
 
 #if TARGET_OS_IOS || TARGET_OS_SIMULATOR
@@ -1594,7 +1765,7 @@ public:
                     cmd.type = DrawCommandType::Image;
                     cmd.viewId = hoppy_->target->windows[0]->viewId;
                     cmd.zIndex = base_z + j * 0.001f;
-                    cmd.texture = resolved.resolved.texture;
+                    cmd.texture = resolved.resolved.texture();
                     cmd.texture2 = &nulltex;
 
                     cmd.x = px;
@@ -1776,10 +1947,24 @@ public:
         // ビュー設定
         bgfx::setViewFrameBuffer(0, BGFX_INVALID_HANDLE);
         bgfx::setViewClear(0, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x808080ff, 1.0f, 0);
+#if defined(__ANDROID__)
+        // On Android, render to full SurfaceView size. System UI (status / nav bar)
+        // を避けるのは mainLocal->paddings 経由でレイアウト側が責任を持つ。
+        // viewport を full にしないと clear color が画面全体に効かず、
+        // システム UI が translucent な場合に背景が漏れる。
+        int viewW = 1200, viewH = 800;
+        SDL_GetWindowSize(window_, &viewW, &viewH);
+        if (viewW <= 0) viewW = 1200;
+        if (viewH <= 0) viewH = 800;
+        bgfx::setViewRect(0, 0, 0, (uint16_t)viewW, (uint16_t)viewH);
+        float orthoProj[16];
+        bx::mtxOrtho(orthoProj, 0.0f, (float)viewW, (float)viewH, 0.0f, 0.0f, 100.0f, 0.0f, bgfx::getCaps()->homogeneousDepth);
+#else
         bgfx::setViewRect(0, 0, 0, 1200, 800);
         // 射影行列設定（2D用）
         float orthoProj[16];
         bx::mtxOrtho(orthoProj, 0.0f, 1200.0f, 800.0f, 0.0f, 0.0f, 100.0f, 0.0f, bgfx::getCaps()->homogeneousDepth);
+#endif
         bgfx::setViewTransform(0, NULL, orthoProj);
         int frameCount = 0;
         auto lastFpsTime = std::chrono::high_resolution_clock::now();
@@ -1792,9 +1977,52 @@ public:
         NewLocal* local = NULL;
         int oldtoken = -1;
         while (running_) {
-            // LLDB driver spawn 前に親の bgfx を shutdown して GPU state を
-            // 解放するためのシグナル受信ポイント (旧 lldbctl 経由)。現状
-            // 立てる側のコードは無いので no-op だが、将来のために残す。
+            // Android: pause while activity is backgrounded. ANativeWindow is
+            // destroyed in that interval; if we call bgfx::reset / frame the
+            // vk swapchain recreate path crashes in vkCreateAndroidSurfaceKHR
+            // (null ANativeWindow* → RefBase::incStrong on addr 0x4).
+            if (paused_) {
+                std::unique_lock<std::mutex> lk(pauseMutex_);
+                rendererIdle_ = true;
+                ackCv_.notify_all();
+                pauseCv_.wait(lk, [this]{ return !paused_ || !running_; });
+                rendererIdle_ = false;
+                if (!running_) break;
+            }
+#if defined(__ANDROID__)
+            // Refresh bgfx PlatformData with the current ANativeWindow before
+            // touching the swapchain. SDL releases its window pointer on surface
+            // destruction and assigns a new one on recreation; bgfx caches the
+            // pointer from init and will otherwise dereference a freed object.
+            if (needsPlatformDataRefresh_.exchange(false)) {
+                SDL_PropertiesID props = SDL_GetWindowProperties(window_);
+                void* curNwh = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr);
+                // 同じ nwh なら bgfx::reset 不要 (= 無駄な swap chain 再作成を避ける、
+                // FOCUS_LOST→FOCUS_GAINED のみで実 ANativeWindow が変わらないケース)
+                static void* s_lastNwh = nullptr;
+                bool nwhChanged = (curNwh != s_lastNwh);
+                SDL_Log("[Android] refreshing bgfx platform data: nwh=%p (changed=%d)",
+                        curNwh, (int)nwhChanged);
+                if (curNwh) {
+                    if (nwhChanged) {
+                        bgfx::PlatformData pd2;
+                        memset(&pd2, 0, sizeof(pd2));
+                        pd2.nwh = curNwh;
+                        bgfx::setPlatformData(pd2);
+                        // Force swapchain recreate at current window size.
+                        int w = 0, h = 0;
+                        SDL_GetWindowSize(window_, &w, &h);
+                        if (w > 0 && h > 0) bgfx::reset((uint32_t)w, (uint32_t)h, BGFX_RESET_VSYNC);
+                        s_lastNwh = curNwh;
+                    }
+                } else {
+                    SDL_Log("[Android] WARNING: ANativeWindow is NULL on refresh; will retry next frame");
+                    needsPlatformDataRefresh_ = true;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(16));
+                    continue;
+                }
+            }
+#endif
             auto start = std::chrono::high_resolution_clock::now();
             std::vector<LayerInfo>* layers = NULL;
             uint64_t frameId = 0;
@@ -1812,8 +2040,28 @@ public:
                 gotNew = hoppy_->target->commandQueue->acquire(&layers, frameId, token);
                 NativeWindow* nw = hoppy_->mainGC->windows[0];
                 if (nw->needsFboReset) {
+#if defined(__ANDROID__)
+                    // SurfaceView may have been recreated (fold/unfold, rotation,
+                    // dock change). Re-fetch nwh so bgfx::reset's swapchain
+                    // recreation uses the live ANativeWindow.
+                    SDL_PropertiesID props = SDL_GetWindowProperties(window_);
+                    void* curNwh = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr);
+                    if (curNwh) {
+                        bgfx::PlatformData pd2;
+                        memset(&pd2, 0, sizeof(pd2));
+                        pd2.nwh = curNwh;
+                        bgfx::setPlatformData(pd2);
+                    } else {
+                        SDL_Log("[Android] needsFboReset but nwh is NULL; deferring reset");
+                        // Leave needsFboReset=true so we retry once the surface is back.
+                        goto skip_main_reset;
+                    }
+#endif
                     bgfx::reset(nw->size.x, nw->size.y);
                     nw->needsFboReset = false;
+#if defined(__ANDROID__)
+                skip_main_reset:;
+#endif
                 }
                 for (int i = 1; i < hoppy_->mainGC->windows.size(); i++) {
                     nw = hoppy_->mainGC->windows[i];
@@ -1874,7 +2122,8 @@ public:
                             // FBO作成（RenderThread上なので直接OK）
                             nw->fbo = bgfx::createFrameBuffer(nw->nwh, (uint16_t)cmd.w, (uint16_t)cmd.h);
                             nw->viewId = hoppy_->basicViewId++;  // 永続的な論理viewId（ウィンドウ用）
-                            if (cmdThgc) cmdThgc->windows.push_back(nw);
+                            // ※ thgc->windows への push_back は myCreatePopupWindow (GoThread)
+                            //    で既に行ってる。ここで重複 push しない。
                         } else {
                             SDL_Log("createPopupWindow failed via RenderThread");
                         }
@@ -1960,7 +2209,7 @@ public:
                             cmd.type = DrawCommandType::Image;
                             cmd.viewId = hoppy_->target->windows[0]->viewId;
                             cmd.zIndex = base_z + i * 0.001f;
-                            cmd.texture = resolved.resolved.texture;
+                            cmd.texture = resolved.resolved.texture();
                             cmd.texture2 = &nulltex;
 
                             // 位置とサイズ（ピクセル座標）
@@ -2013,6 +2262,12 @@ public:
     SDL_Window* window_;
     std::thread thread_;
     std::atomic<bool> running_;
+    std::atomic<bool> paused_{false};
+    std::atomic<bool> needsPlatformDataRefresh_{false};
+    std::atomic<bool> rendererIdle_{false};
+    std::mutex pauseMutex_;
+    std::condition_variable pauseCv_;
+    std::condition_variable ackCv_;
     bool videoLoaded_ = false;
 };
 FontAtlas* getAtlas(ThreadGC* thgc) {
@@ -2059,6 +2314,13 @@ ResolvedTexture myResolveForDraw(ThreadGC* thgc, ImageId imageId) {
 StandaloneTextureInfo* mygetStandaloneTextureInfo(ThreadGC* thgc, ImageId imageId) {
     return thgc->hoppy->master.getStandaloneTexture(imageId);
 }
+// GoThread から呼んで cmd に渡す TextureSlot* を取得する。
+// imageLocations_[id].slot のアドレス (stable) を返す。
+// 全 placement (Standalone / Grid / Shelf) 共通の経路。
+// 戻り値が nullptr の場合は cmd 側で &nulltex フォールバック推奨。
+TextureSlot* myResolveSlot(ThreadGC* thgc, ImageId imageId) {
+    return thgc->hoppy->master.resolveSlot(imageId);
+}
 // 指定 tile を lazy 生成 (= bgfx createTexture/createFrameBuffer)。
 // 既に valid なら no-op。createTiledOffscreenInternal で全 tile を一括生成しなく
 // なったので、render path は使用直前にこれを呼ぶ。
@@ -2096,12 +2358,41 @@ NativeWindow* myCreatePopupWindow(ThreadGC* thgc, NativeWindowType type, PopupAn
     nw->size = { w, h };
     nw->anchorElement = anchorElem;
     nw->visible = visible;
+    nw->fbo = BGFX_INVALID_HANDLE;  // RenderThread の Create cmd 処理で埋まる
 
     // 動的に確保した popup の GC ポインタ field を root 登録 (= GC が popup の UI ツリーを拾う)。
     // RootNode を popup ごとに作っておき、myDestroyPopupWindow で release する。
     nw->rootNode = GC_add_root_node(thgc);
     GC_add_root(nw->rootNode, (char**)&nw->local);
     GC_add_root(nw->rootNode, (char**)&nw->anchorElement);
+
+#if defined(__ANDROID__)
+    // Android では SDL_CreatePopupWindow が無いので、別 OS window を作らない。
+    // 代わりに mainWin の SDL window / FBO / nwh / viewId を共有して、popup を
+    // **十分に高い zIndex でメイン画面にオーバーレイ描画** する。
+    // popup の anchor 位置は描画側 (ElementDraw 等) が anchorX/Y を起点に絶対座標で配置する。
+    // popup->local の cmd は mainWin の FBO に書き込まれる → 既存の compositing で
+    // popup を main の最上面に積む形になる。
+    if (!thgc->hoppy->mainGC->windows.empty()) {
+        NativeWindow* mainWin = thgc->hoppy->mainGC->windows[0];
+        nw->sdlWindow = mainWin->sdlWindow;
+        nw->nwh       = mainWin->nwh;
+        nw->fbo       = mainWin->fbo;     // = BGFX_INVALID_HANDLE (main は backbuffer)
+        nw->viewId    = mainWin->viewId;
+        nw->parent    = mainWin;
+        nw->visible   = visible;
+    }
+    // Android では Create cmd を queue に積まない (SDL_CreatePopupWindow は呼ばない)。
+    // buildFrame の windows ループに乗せるため push_back だけする。
+    thgc->windows.push_back(nw);
+    return nw;
+#else
+    // ★ GoThread の buildFrame で windows をループして measure/draw する経路で、
+    //   popup の子要素 (popup->local 配下) が辿られるためには popup の NativeWindow を
+    //   即時 windows に追加しておく必要がある。SDL/FBO が未生成でも、cmd は
+    //   &nw->fbo を捕まえれば render thread 側で値が埋まったあとに valid な FBO で
+    //   描画される。size も既に確保時の (w,h) で書いてある。
+    thgc->windows.push_back(nw);
 
     PopupCmd cmd{};
     cmd.type = PopupCmdType::Create;
@@ -2118,6 +2409,7 @@ NativeWindow* myCreatePopupWindow(ThreadGC* thgc, NativeWindowType type, PopupAn
         thgc->hoppy->popupCmdQueue.push_back(cmd);
     }
     return nw;  // 即座に返す。描画命令より先にRenderThreadが初期化する
+#endif
 }
 
 // ポップアップリサイズ（キューに積むだけ、ブロックしない）
@@ -2149,6 +2441,19 @@ void myDestroyPopupWindow(ThreadGC* thgc, NativeWindow* popup) {
 // ウィンドウ表示（キューに積むだけ、ブロックしない）
 void myShowWindow(ThreadGC* thgc, NativeWindow* nw) {
     if (!nw) return;
+    nw->visible = true;
+    // popup を出した直後は buildFrame で measure / paint を回さないと内容が空 (= 黒) のまま
+    // publish されてしまうので、必ず invalidate を立てる。
+    if (thgc && thgc->hoppy) thgc->hoppy->invalidate = HopStar::kInvalidateFrames;
+#if defined(__ANDROID__)
+    // Android: 別 OS window が無いので、SDL_ShowWindow ではなく直接 visible を立てる。
+    // GoThread で同期更新するので drawScreen は同フレームから popup を render する
+    auto& op = thgc->openPopups;
+    if (std::find(op.begin(), op.end(), nw) == op.end()) {
+        op.push_back(nw);
+    }
+    return;
+#else
     {
         std::lock_guard<std::mutex> lock(thgc->hoppy->popupCmdMutex);
         // 同じウィンドウのHideが未処理なら相殺して何もしない
@@ -2172,11 +2477,19 @@ void myShowWindow(ThreadGC* thgc, NativeWindow* nw) {
     if (std::find(op.begin(), op.end(), nw) == op.end()) {
         op.push_back(nw);
     }
+#endif
 }
 
 // ウィンドウ非表示（キューに積むだけ、ブロックしない）
 void myHideWindow(ThreadGC* thgc, NativeWindow* nw) {
     if (!nw) return;
+#if defined(__ANDROID__)
+    // Android: 直接 visible を落とす + openPopups からも削除。
+    nw->visible = false;
+    auto& op = thgc->openPopups;
+    op.erase(std::remove(op.begin(), op.end(), nw), op.end());
+    return;
+#else
     {
         std::lock_guard<std::mutex> lock(thgc->hoppy->popupCmdMutex);
         // 同じウィンドウのShowが未処理なら相殺して何もしない
@@ -2198,11 +2511,24 @@ void myHideWindow(ThreadGC* thgc, NativeWindow* nw) {
     // openPopups から削除
     auto& op = thgc->openPopups;
     op.erase(std::remove(op.begin(), op.end(), nw), op.end());
+#endif
 }
 
 // ウィンドウ位置変更（キューに積むだけ、ブロックしない）
 void myMoveWindow(ThreadGC* thgc, NativeWindow* nw, int x, int y) {
     if (!nw) return;
+    // anchor 値は常に更新 (drawScreen 等が anchorX/Y を直接参照するので両プラットフォームで必要)
+    nw->anchorX = x;
+    nw->anchorY = y;
+#if defined(__ANDROID__)
+    // Android: 別 OS window が無いので SDL_SetWindowPosition は意味なし。
+    // 代わりに popup elem の pos を更新 → getAbsolutePosition が新位置を返す。
+    if (nw->local) {
+        nw->local->pos.x = (float)x;
+        nw->local->pos.y = (float)y;
+    }
+    // popupCmdQueue にも push しない (RenderThread 側で SDL を触らない設計)。
+#else
     PopupCmd cmd{};
     cmd.type = PopupCmdType::Move;
     cmd.target = nw;
@@ -2211,4 +2537,5 @@ void myMoveWindow(ThreadGC* thgc, NativeWindow* nw, int x, int y) {
         std::lock_guard<std::mutex> lock(thgc->hoppy->popupCmdMutex);
         thgc->hoppy->popupCmdQueue.push_back(cmd);
     }
+#endif
 }

@@ -11,8 +11,13 @@ cmake_minimum_required(VERSION 3.21)
 # =============================================================================
 project(HopStar
     VERSION 1.0.0
-    LANGUAGES C CXX OBJC OBJCXX Swift
+    LANGUAGES C CXX
 )
+
+# Apple platforms need Obj-C/Obj-C++/Swift
+if(APPLE)
+    enable_language(OBJC OBJCXX Swift)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -362,7 +367,7 @@ if(PLATFORM_LINUX)
     message(STATUS "Configuring Linux target")
 
     set(LINUX_SOURCES
-        main5.cpp
+        main.cpp
     )
 
     add_executable(HopStar_Linux
@@ -374,7 +379,25 @@ if(PLATFORM_LINUX)
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${BGFX_INCLUDE_DIR}
         ${FFMPEG_INCLUDE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/android/app/jni/nlohmann_json/single_include
+        ${CMAKE_CURRENT_SOURCE_DIR}/libs/nlohmann
     )
+
+    target_compile_definitions(HopStar_Linux PRIVATE
+        BX_CONFIG_DEBUG=$<IF:$<CONFIG:Debug>,1,0>
+        __linux__
+    )
+
+    # SDL3_ttf
+    find_package(SDL3_ttf QUIET)
+    if(NOT SDL3_ttf_FOUND)
+        find_library(SDL3_TTF_LIBRARY SDL3_ttf)
+        find_path(SDL3_TTF_INCLUDE_DIR SDL3_ttf/SDL_ttf.h)
+    endif()
+
+    # PortAudio
+    find_library(PORTAUDIO_LIBRARY portaudio)
+    find_path(PORTAUDIO_INCLUDE_DIR portaudio.h)
 
     target_link_libraries(HopStar_Linux PRIVATE
         SDL3::SDL3
@@ -386,6 +409,18 @@ if(PLATFORM_LINUX)
         dl
     )
 
+    if(SDL3_ttf_FOUND)
+        target_link_libraries(HopStar_Linux PRIVATE SDL3_ttf::SDL3_ttf)
+    elseif(SDL3_TTF_LIBRARY)
+        target_link_libraries(HopStar_Linux PRIVATE ${SDL3_TTF_LIBRARY})
+        target_include_directories(HopStar_Linux PRIVATE ${SDL3_TTF_INCLUDE_DIR})
+    endif()
+
+    if(PORTAUDIO_LIBRARY)
+        target_link_libraries(HopStar_Linux PRIVATE ${PORTAUDIO_LIBRARY})
+        target_include_directories(HopStar_Linux PRIVATE ${PORTAUDIO_INCLUDE_DIR})
+    endif()
+
     # OpenGL for Linux
     find_package(OpenGL REQUIRED)
     target_link_libraries(HopStar_Linux PRIVATE OpenGL::GL)
@@ -394,6 +429,12 @@ if(PLATFORM_LINUX)
     find_package(X11 REQUIRED)
     target_link_libraries(HopStar_Linux PRIVATE ${X11_LIBRARIES})
     target_include_directories(HopStar_Linux PRIVATE ${X11_INCLUDE_DIR})
+
+    # Vulkan for Linux (bgfx Vulkan backend)
+    find_package(Vulkan QUIET)
+    if(Vulkan_FOUND)
+        target_link_libraries(HopStar_Linux PRIVATE Vulkan::Vulkan)
+    endif()
 
     if(HOPSTAR_ENABLE_FFMPEG)
         target_link_libraries(HopStar_Linux PRIVATE

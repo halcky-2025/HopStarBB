@@ -1,4 +1,4 @@
-﻿#if defined(__ANDROID__) || defined(__APPLE__)
+﻿#if defined(__ANDROID__) || defined(__APPLE__) || defined(__linux__)
 #include <coroutine>
 namespace coro = std;
 #else

@@ -4,11 +4,13 @@
             "name": "Linux",
             "includePath": [
                 "${workspaceFolder}/**",
+                "${env:HOME}/local/include",
                 "/usr/include",
                 "/usr/local/include"
             ],
             "defines": [
-                "SDL_MAIN_HANDLED"
+                "__linux__",
+                "BX_CONFIG_DEBUG=1"
             ],
             "compilerPath": "/usr/bin/g++",
             "cStandard": "c17",

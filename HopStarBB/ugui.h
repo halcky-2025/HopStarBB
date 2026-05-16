@@ -1916,7 +1916,7 @@ public:
         }
 
         // オーディオトラック（同じファイルから音声を抽出）
-        auto audio_track = timeline_.add_audio_track();
+        /*auto audio_track = timeline_.add_audio_track();
         auto audio_clip = audio_track->add_clip();
 
         if (videoLoaded_ && audio_clip->open(videoPath.c_str())) {
@@ -1929,7 +1929,7 @@ public:
         audio_output_ = std::make_unique<nle::AudioOutput>(timeline_);
         if (!audio_output_->initialize()) {
             SDL_Log("AudioOutput initialization failed");
-        }
+        }*/
         renderer_ = std::make_unique <nle::TimelineRenderer<ImageMaster >>(timeline_, hoppy_->master);
         if (videoLoaded_) {
             timeline_.play();
@@ -2336,7 +2336,10 @@ TiledTextureInfo* shader_lookupTiledTexture(ImageMaster& master, ImageId id) {
     return master.getTiledTexture(id);
 }
 bool shader_ensureTile(ImageMaster& master, ImageId id, int tileIdx) {
-    return master.ensureTile(id, tileIdx);
+    // renderAllCommands 内から呼ばれる → 同フレームで描画されるので
+    // initFreshRenderTargetLayout (view 255 clear) をスキップする。
+    // clear が描画より後に実行されて結果を上書きする問題を防ぐ。
+    return master.ensureTile(id, tileIdx, /*skipLayoutInit=*/true);
 }
 TiledResolveResult myResolveTiledForDraw(ThreadGC* thgc, ImageId imageId) {
     return thgc->hoppy->master.resolveTiledForDraw(imageId);

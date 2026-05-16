@@ -19,6 +19,22 @@ extern "C" {
 }
 #endif
 
+#ifdef __linux__
+#include <unistd.h>
+#include <dlfcn.h>
+#include <linux/limits.h>
+#include <libgen.h>
+#include <sys/stat.h>
+#include <pwd.h>
+extern "C" {
+    #include <libavformat/avformat.h>
+    #include <libavcodec/avcodec.h>
+    #include <libswscale/swscale.h>
+    #include <libavdevice/avdevice.h>
+    #include <libswresample/swresample.h>
+}
+#endif
+
 #include <iostream>
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>          // SDL3 のエントリポイントマクロ (Android では必須)
@@ -31,7 +47,7 @@ extern "C" {
 #include "threed.h"
 #include <cstdint>
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__linux__)
 #include "miniaudio.h"
 #endif
 
@@ -61,7 +77,7 @@ namespace F = torch::nn::functional;
 #include "audio.h"
 #include "elem.h"
 
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__linux__)
 #include <thread>
 #include <chrono>
 #endif
@@ -361,6 +377,10 @@ int main(int argc, char** argv) {
         // 内に閉じる (viewport offset + size を buildFrame で毎フレーム調整)。
         SDL_Window* window = SDL_CreateWindow("HopStarBB", 0, 0,
             SDL_WINDOW_VULKAN);
+#elif defined(__linux__)
+        SDL_Window* window = SDL_CreateWindow("HopStarBB",
+            1200, 800,
+            SDL_WINDOW_BORDERLESS | SDL_WINDOW_RESIZABLE | SDL_WINDOW_VULKAN);
 #else
         SDL_Window* window = SDL_CreateWindow("SDL3 Example",
             1200, 800,
@@ -566,8 +586,18 @@ int main(int argc, char** argv) {
 #elif defined(__ANDROID__)
         mainWin->nwh = SDL_GetPointerProperty(mainProps, SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr);
         SDL_Log("ANativeWindow nwh=%p", mainWin->nwh);
+#elif defined(__linux__)
+        // Linux: X11 window is a numeric ID (not a pointer)
+        {
+            uint64_t x11win = (uint64_t)SDL_GetNumberProperty(mainProps, "SDL.window.x11.window", 0);
+            if (x11win) {
+                mainWin->nwh = (void*)(uintptr_t)x11win;
+            } else {
+                // Wayland: wl_surface is a pointer
+                mainWin->nwh = SDL_GetPointerProperty(mainProps, "SDL.window.wayland.surface", nullptr);
+            }
+        }
 #else
-        // Linux/macOS は今のところ未対応。必要なら X11/Wayland/Cocoa の SDL property を分岐追加。
         mainWin->nwh = nullptr;
 #endif
         hoppy->mainGC->windows.push_back(mainWin);
@@ -732,6 +762,7 @@ int main(int argc, char** argv) {
         render->start();
         s_eventWatchCtx.render = render;
 		runGoThreadAsync(magc);
+        SDL_Log("Entering main event loop");
         while (running) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             /*for (int i = 0; i < WORKER_COUNT; i++) {
@@ -833,6 +864,7 @@ int main(int argc, char** argv) {
                     }
 				}
 				else if (event.type == SDL_EVENT_QUIT) {
+                    SDL_Log("SDL_EVENT_QUIT received, exiting");
 					running = 0;
                 }
 #ifdef __ANDROID__
@@ -1002,6 +1034,15 @@ int main(int argc, char** argv) {
                             }
 #elif defined(__ANDROID__)
                             req->resultNwh = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr);
+#elif defined(__linux__)
+                            {
+                                uint64_t x11win = (uint64_t)SDL_GetNumberProperty(props, "SDL.window.x11.window", 0);
+                                if (x11win) {
+                                    req->resultNwh = (void*)(uintptr_t)x11win;
+                                } else {
+                                    req->resultNwh = SDL_GetPointerProperty(props, "SDL.window.wayland.surface", nullptr);
+                                }
+                            }
 #else
                             req->resultNwh = nullptr;
 #endif

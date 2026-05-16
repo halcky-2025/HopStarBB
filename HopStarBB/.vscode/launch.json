@@ -2,15 +2,6 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "HopStar Linux (Debug)",
-            "type": "lldb",
-            "request": "launch",
-            "program": "${workspaceFolder}/build/bin/HopStar_Linux",
-            "args": [],
-            "cwd": "${workspaceFolder}",
-            "preLaunchTask": "CMake: Build Debug"
-        },
-        {
             "name": "HopStar Linux (GDB)",
             "type": "cppdbg",
             "request": "launch",
@@ -18,18 +9,45 @@
             "args": [],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
-            "environment": [],
-            "externalConsole": false,
+            "environment": [
+                {
+                    "name": "LD_LIBRARY_PATH",
+                    "value": "${env:HOME}/local/lib:${env:LD_LIBRARY_PATH}"
+                }
+            ],
+            "externalConsole": true,
             "MIMode": "gdb",
             "setupCommands": [
                 {
                     "description": "Enable pretty-printing for gdb",
                     "text": "-enable-pretty-printing",
                     "ignoreFailures": true
+                },
+                {
+                    "description": "Set pending breakpoints",
+                    "text": "-gdb-set breakpoint pending on",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Disable startup shell to avoid tty warning",
+                    "text": "-gdb-set startup-with-shell off",
+                    "ignoreFailures": true
                 }
             ],
             "preLaunchTask": "CMake: Build Debug",
             "miDebuggerPath": "/usr/bin/gdb"
+        },
+        {
+            "name": "HopStar Linux (LLDB)",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/bin/HopStar_Linux",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "LD_LIBRARY_PATH": "${env:HOME}/local/lib:${env:LD_LIBRARY_PATH}"
+            },
+            "preLaunchTask": "CMake: Build Debug"
         }
     ]
 }

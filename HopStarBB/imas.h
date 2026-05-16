@@ -1456,18 +1456,40 @@ public:
             }
         }
 
+        // 同じIDに対して create と resize が同一フレームに積まれた場合、
+        // resize のサイズで create し、resize はスキップする。
+        // (1x1 で create → 即 resize だと、create 後の 1x1 テクスチャが一瞬使われて
+        //  描画が空になる問題を防ぐ)
+        std::unordered_map<ImageId, size_t> resizeByIdMap;
+        for (size_t i = 0; i < resizes.size(); ++i) {
+            resizeByIdMap[resizes[i].id] = i;  // 最後の resize が勝つ
+        }
+
+        std::unordered_set<ImageId> mergedResizeIds;
+
         // 作成（破棄対象はスキップ）
         for (auto& req : creates) {
             if (destroySet.count(req.id)) continue;
+            // create と resize が同フレームにある場合、resize のサイズで create する
+            auto rit = resizeByIdMap.find(req.id);
+            if (rit != resizeByIdMap.end()) {
+                auto& resizeReq = resizes[rit->second];
+                req.width = resizeReq.width;
+                req.height = resizeReq.height;
+                req.pageW = resizeReq.pageW;
+                req.pageH = resizeReq.pageH;
+                mergedResizeIds.insert(req.id);
+            }
             bool ok = createOffscreenInternal(req.id, req.width, req.height, req.persistent, req.pageW, req.pageH);
             if (ok && req.dest) {
                 auto textureInfo = getStandaloneTexture(req.id);
             }
         }
 
-        // リサイズ（破棄対象はスキップ）
+        // リサイズ（破棄対象はスキップ、create にマージ済みもスキップ）
         for (auto& req : resizes) {
             if (destroySet.count(req.id)) continue;
+            if (mergedResizeIds.count(req.id)) continue;
             bool ok = resizeOffscreenInternal(req.id, req.width, req.height, req.pageW, req.pageH);
             if (ok && req.dest) {
                 auto textureInfo = getStandaloneTexture(req.id);
@@ -1953,7 +1975,10 @@ public:
     //   tile.handle / tile.fbo が既に valid なら何もせず true。
     //   render into / sample 直前に呼んで初めて bgfx リソースを確保することで、
     //   N ファイル open 時の「100+ tile 一斉確保 → bgfx 立て込み」を回避する。
-    bool ensureTile(ImageId id, int tileIdx) {
+    // skipLayoutInit=true の場合、initFreshRenderTargetLayout をスキップする。
+    // renderAllCommands 内から呼ばれる場合は、同フレームで描画が行われるため
+    // view 255 の clear が描画結果を上書きしてしまう問題を防ぐ。
+    bool ensureTile(ImageId id, int tileIdx, bool skipLayoutInit = false) {
         std::lock_guard lock(tiledMutex_);
         auto it = tiledTextures_.find(id);
         if (it == tiledTextures_.end()) return false;
@@ -1985,7 +2010,9 @@ public:
         }
         tile.handle = colorHandle;
         tile.fbo    = fbo;
-        initFreshRenderTargetLayout(fbo, tile.w, tile.h);
+        if (!skipLayoutInit) {
+            initFreshRenderTargetLayout(fbo, tile.w, tile.h);
+        }
         return true;
     }
 

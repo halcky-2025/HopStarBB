@@ -7,24 +7,11 @@
             "command": "cmake",
             "args": [
                 "-B", "build",
-                "-S", "linux",
+                "-S", ".",
                 "-DCMAKE_BUILD_TYPE=Debug",
-                "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
-            ],
-            "options": {
-                "cwd": "${workspaceFolder}"
-            },
-            "group": "build",
-            "problemMatcher": []
-        },
-        {
-            "label": "CMake: Configure Release",
-            "type": "shell",
-            "command": "cmake",
-            "args": [
-                "-B", "build",
-                "-S", "linux",
-                "-DCMAKE_BUILD_TYPE=Release",
+                "-DCMAKE_PREFIX_PATH=${HOME}/local",
+                "-DHOPSTAR_ENABLE_FFMPEG=ON",
+                "-DHOPSTAR_ENABLE_TORCH=OFF",
                 "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
             ],
             "options": {
@@ -65,7 +52,6 @@
                 "cwd": "${workspaceFolder}"
             },
             "group": "build",
-            "dependsOn": "CMake: Configure Release",
             "problemMatcher": ["$gcc"]
         },
         {
@@ -82,19 +68,9 @@
             "problemMatcher": []
         },
         {
-            "label": "CMake: Rebuild Debug",
-            "type": "shell",
-            "command": "rm -rf build && cmake -B build -S linux -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON && cmake --build build --parallel",
-            "options": {
-                "cwd": "${workspaceFolder}"
-            },
-            "group": "build",
-            "problemMatcher": ["$gcc"]
-        },
-        {
             "label": "Run HopStar",
             "type": "shell",
-            "command": "${workspaceFolder}/build/bin/HopStar_Linux",
+            "command": "LD_LIBRARY_PATH=${HOME}/local/lib:$LD_LIBRARY_PATH ${workspaceFolder}/build/bin/HopStar_Linux",
             "options": {
                 "cwd": "${workspaceFolder}"
             },

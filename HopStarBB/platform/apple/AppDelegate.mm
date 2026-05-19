@@ -9,17 +9,20 @@
 #include <bgfx/bgfx.h>
 #include <bgfx/platform.h>
 
-// Include chain (same order as main2.cpp for Android)
+// Include chain (same order as main.cpp; state.h between db2.h and elem.h,
+// stb_image.h before elem.h なので encode.h からの stbi_* 参照が解決する)
 #include "gc.h"
 #include "arr.h"
 #include "sqlite3.h"
 #include "db2.h"
+#include "state.h"
+// stb_image.h は main.cpp で IMPLEMENTATION を持つ。AppDelegate.mm では宣言のみ取り込む。
+#include "stb_image.h"
+#include "stb_image_write.h"
 #include "elem.h"
 #include "shader.h"
 #include "shader2.h"
 #include "thumnailAtlas.h"
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
 #include "imas.h"
 #include "audio.h"
 #include "ugui.h"

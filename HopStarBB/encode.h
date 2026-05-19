@@ -30,6 +30,10 @@
 #include <string>
 #include <SDL3/SDL_dialog.h>
 #include <portaudio.h>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#include <dispatch/dispatch.h>
+#endif
 
 // FileEngine 本体 (worker thread + readAsync を使う):
 //   - getFileEngine()           インスタンス取得
@@ -899,6 +903,70 @@ struct _DialogCtx {
 	bool isMulti;
 };
 
+#if defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_SIMULATOR)
+// ============================================================
+// iOS: UIDocumentPickerViewController で OpenFile を実装。
+// SDL3 は iOS dialog 未実装 (dummy) のため自前で出す。
+// ============================================================
+#import <UIKit/UIKit.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+
+@interface HopStarDocPickerDelegate : NSObject <UIDocumentPickerDelegate>
+@property (nonatomic, assign) SDL_DialogFileCallback cb;
+@property (nonatomic, assign) void* uctx;
+@end
+
+@implementation HopStarDocPickerDelegate
+- (void)documentPicker:(UIDocumentPickerViewController *)controller
+    didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    if (urls.count == 0) {
+        if (self.cb) self.cb(self.uctx, NULL, -1);
+    } else {
+        std::vector<const char*> paths;
+        std::vector<std::string> store;
+        store.reserve(urls.count);
+        for (NSURL* url in urls) {
+            [url startAccessingSecurityScopedResource];
+            store.push_back(std::string([url.path UTF8String]));
+        }
+        for (auto& s : store) paths.push_back(s.c_str());
+        paths.push_back(nullptr);
+        if (self.cb) self.cb(self.uctx, paths.data(), 0);
+    }
+    // ARC: no manual release
+}
+- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
+    if (self.cb) self.cb(self.uctx, NULL, -1);
+    // ARC: no manual release
+}
+@end
+
+inline void _iOSPresentOpenFilePicker(void* uikitWindow, SDL_DialogFileCallback cb, void* uctx) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow* win = (__bridge UIWindow*)uikitWindow;
+        UIViewController* root = win.rootViewController;
+        if (!root) {
+            SDL_Log("[iOSPresentOpenFilePicker] no rootViewController!");
+            if (cb) cb(uctx, NULL, -1);
+            return;
+        }
+        // 「すべての種類のファイル」を許可 (UTType.data = 任意の data ファイル)
+        NSArray<UTType*>* types = @[ UTTypeItem, UTTypeData, UTTypeContent ];
+        UIDocumentPickerViewController* picker =
+            [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types asCopy:NO];
+        picker.allowsMultipleSelection = NO;
+        HopStarDocPickerDelegate* del = [[HopStarDocPickerDelegate alloc] init];
+        del.cb = cb;
+        del.uctx = uctx;
+        picker.delegate = del;
+        // present from top-most controller
+        UIViewController* top = root;
+        while (top.presentedViewController) top = top.presentedViewController;
+        [top presentViewController:picker animated:YES completion:nil];
+    });
+}
+#endif
+
 // SDL コールバック: 別スレッドの可能性 → SDL_PushEvent で main thread に dispatch
 inline void SDLCALL _onDialogResult(void* userdata, const char* const* filelist, int /*filter*/) {
 	auto* ctx = static_cast<_DialogCtx*>(userdata);
@@ -1128,7 +1196,22 @@ inline void ShowOpenFileDialog(ThreadGC* thgc,
 	auto* ctx = new _DialogCtx{ thgc, std::move(onSelected), {}, /*isMulti=*/false };
 	if (!filters) filters = DefaultOpenFilters(&filterCount);
 	SDL_Window* win = (thgc && !thgc->windows.empty()) ? thgc->windows[0]->sdlWindow : nullptr;
+#if defined(__APPLE__) && !TARGET_OS_IOS && !TARGET_OS_SIMULATOR
+	// macOS: NSOpenPanel must be created on main thread
+	struct Arg { SDL_DialogFileCallback cb; void* uctx; SDL_Window* win; const SDL_DialogFileFilter* flt; int fltCount; const char* defPath; };
+	auto* arg = new Arg{ _onDialogResult, ctx, win, filters, filterCount, defaultPath };
+	dispatch_async(dispatch_get_main_queue(), ^{
+		SDL_ShowOpenFileDialog(arg->cb, arg->uctx, arg->win, arg->flt, arg->fltCount, arg->defPath, /*allow_many=*/false);
+		delete arg;
+	});
+#elif defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_SIMULATOR)
+	// iOS: SDL3 の dialog は dummy 実装なので動かない。UIDocumentPickerViewController を直接呼ぶ。
+	SDL_Log("[ShowOpenFileDialog] iOS: presenting UIDocumentPickerViewController");
+	void* uikitWin = SDL_GetPointerProperty(SDL_GetWindowProperties(win), "SDL.window.uikit.window", nullptr);
+	_iOSPresentOpenFilePicker(uikitWin, _onDialogResult, ctx);
+#else
 	SDL_ShowOpenFileDialog(_onDialogResult, ctx, win, filters, filterCount, defaultPath, /*allow_many=*/false);
+#endif
 }
 
 // 複数ファイル選択 (NULL 終端の char** が来る)
@@ -1141,7 +1224,16 @@ inline void ShowOpenFilesDialog(ThreadGC* thgc,
 	auto* ctx = new _DialogCtx{ thgc, {}, std::move(onSelected), /*isMulti=*/true };
 	if (!filters) filters = DefaultOpenFilters(&filterCount);
 	SDL_Window* win = (thgc && !thgc->windows.empty()) ? thgc->windows[0]->sdlWindow : nullptr;
+#if defined(__APPLE__) && !TARGET_OS_IOS && !TARGET_OS_SIMULATOR
+	struct Arg { SDL_DialogFileCallback cb; void* uctx; SDL_Window* win; const SDL_DialogFileFilter* flt; int fltCount; const char* defPath; };
+	auto* arg = new Arg{ _onDialogResult, ctx, win, filters, filterCount, defaultPath };
+	dispatch_async(dispatch_get_main_queue(), ^{
+		SDL_ShowOpenFileDialog(arg->cb, arg->uctx, arg->win, arg->flt, arg->fltCount, arg->defPath, /*allow_many=*/true);
+		delete arg;
+	});
+#else
 	SDL_ShowOpenFileDialog(_onDialogResult, ctx, win, filters, filterCount, defaultPath, /*allow_many=*/true);
+#endif
 }
 
 // 保存ダイアログ

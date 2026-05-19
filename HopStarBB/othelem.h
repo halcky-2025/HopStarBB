@@ -341,8 +341,8 @@ void initPopup(ThreadGC* thgc, NewLocal* local, PopupWindow* popup, PopupAnchor 
 	if (p) {
 		p->local = popup;
 		popup->offscreen->window = p;
-#if defined(__ANDROID__)
-		// Android: 別 OS window が無いので、popup の絶対位置を **parent chain 経由で**
+#if defined(__ANDROID__) || (defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_SIMULATOR))
+		// Android / iOS: 別 OS window が無いので、popup の絶対位置を **parent chain 経由で**
 		// 解決させる。子要素リスト (childend) には挿入せず popup->parent のみセット:
 		//   - getAbsolutePosition(popup) は parent ポインタを辿って anchor の絶対位置を
 		//     取得し、popup->pos を加算 → anchor 真下に表示される
@@ -1335,11 +1335,15 @@ inline NewElement* MakeTextBox(ThreadGC* thgc, String* text) {
 }
 // 既存タブバーに viewer をぶら下げる
 inline void AddViewerToTab(ThreadGC* thgc, NewElement* viewer, const char* tabName) {
-	if (!viewer) return;
+	SDL_Log("[AddViewerToTab] enter thgc=%p viewer=%p tabName=%s thgc->local=%p thgc->map=%p",
+	        (void*)thgc, (void*)viewer, tabName, (void*)(thgc?thgc->local:nullptr), (void*)(thgc?thgc->map:nullptr));
+	if (!viewer) { SDL_Log("[AddViewerToTab] viewer is null, return"); return; }
 	String* tabKey = createString(thgc, (char*)"tab", 3, 1);
 	NewElement* te = (NewElement*)get_mapy(thgc->map, tabKey);
-	if (!te) { return; }
+	SDL_Log("[AddViewerToTab] get_mapy(tab) -> te=%p", (void*)te);
+	if (!te) { SDL_Log("[AddViewerToTab] te==nullptr, EARLY RETURN (tab not registered in thgc->map)"); return; }
 	NewTabBar* tab = (NewTabBar*)te;
+	SDL_Log("[AddViewerToTab] tab=%p tab->linked=%p", (void*)tab, (void*)tab->linked);
 
 	NewTabTitle* title = (NewTabTitle*)GC_alloc(thgc, CType::_TabTitleC);
 	initTabTitle(thgc, title);
@@ -1357,6 +1361,8 @@ inline void AddViewerToTab(ThreadGC* thgc, NewElement* viewer, const char* tabNa
 
 	tab->linked->offscreen->markLayout(thgc->local, (NewElement*)tab->linked);
 	markLayoutOf(tab, thgc->local);
+	SDL_Log("[AddViewerToTab] done. tab->linked->page=%p tab->select=%p",
+	        (void*)tab->linked->page, (void*)tab->select);
 }
 
 
@@ -4746,7 +4752,18 @@ inline NewElement* MakeRichTextBox(ThreadGC* thgc, String* text) {
 	// X / Y とも Scroll モード。Page モードはページめくりアニメが要るとき復活させる方針。
 	setPercentX(tb, 1.0f, 0, SizeType::Scroll);
 	setPercentY(tb, 1.0f, 0, SizeType::Page);
+	SDL_Log("[MakeRichTextBox] before SetRichText tb=%p text=%p text->size=%d tb->offscreen=%p tb->offscreen->window=%p linkWin=%p",
+	        (void*)tb, (void*)text, text?text->size:-1,
+	        (void*)tb->offscreen, (void*)(tb->offscreen?tb->offscreen->window:nullptr), (void*)linkWin);
 	if (text) SetRichText(thgc, thgc->local, tb, text);
+	// 行数カウント (childend からたどる)
+	int nChildren = 0;
+	if (tb->childend) {
+		NewElement* it = tb->childend->next;
+		while (it && it != tb->childend && nChildren < 100000) { nChildren++; it = it->next; }
+	}
+	SDL_Log("[MakeRichTextBox] after SetRichText tb=%p children=%d childend=%p tb->offscreened=%d",
+	        (void*)tb, nChildren, (void*)tb->childend, (int)tb->offscreened);
 	return (NewElement*)tb;
 }
 // ============================================================
@@ -4768,14 +4785,20 @@ void OpenFile(Frame* frame) {
 	MouseEvent* act = (MouseEvent*)mo->action;
 	if (act->action != SDL_EVENT_MOUSE_BUTTON_DOWN) return;
 	ThreadGC* thgc = act->elem->gc;   // lambda 起動前に取得
+	SDL_Log("[OpenFile] click thgc=%p tid=%llu", (void*)thgc,
+	        (unsigned long long)std::hash<std::thread::id>{}(std::this_thread::get_id()));
 
 	// (1)-(3): ダイアログ → main thread に戻ってきた時点でこの lambda が呼ばれる
 	ShowOpenFileDialog(thgc, [](ThreadGC* thgc, const char* path) {
+		SDL_Log("[OpenFile.cb1] dialog result thgc=%p path=%s tid=%llu", (void*)thgc, path,
+		        (unsigned long long)std::hash<std::thread::id>{}(std::this_thread::get_id()));
 		// path は SDL_strdup された一時バッファ。lambda の外まで生かしたいので std::string へ。
 		std::string pathStr(path);
 
 		// (4)-(6): FileEngine worker で読み込み、main thread に戻ってきたらこの lambda
 		LoadFileAsync(thgc, pathStr, [pathStr](ThreadGC* thgc, Stream* s) {
+			SDL_Log("[OpenFile.cb2] load done thgc=%p s=%p tid=%llu", (void*)thgc, (void*)s,
+			        (unsigned long long)std::hash<std::thread::id>{}(std::this_thread::get_id()));
 			// (7): main thread, viewer 作成
 			if (!s) return;
 

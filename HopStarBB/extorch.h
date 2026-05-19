@@ -6,7 +6,7 @@
 #include <chrono>
 #include <iostream>
 
-#if !TARGET_OS_IOS && !TARGET_OS_SIMULATOR && !defined(__ANDROID__) && !defined(__linux__)
+#if !TARGET_OS_IOS && !TARGET_OS_SIMULATOR && !defined(__ANDROID__) && !defined(__linux__) && !TARGET_OS_OSX
 
 class CustomModuleImpl;
 
@@ -1404,7 +1404,7 @@ CustomModuleImpl* ReadDll(ThreadGC* thgc, const char* dll_path = "foo.dll") {
 #endif // !TARGET_OS_IOS && !TARGET_OS_SIMULATOR && !__ANDROID__ && !__linux__
 
 // Timing function needed by GoThread - shared for all platforms
-#if TARGET_OS_IOS || TARGET_OS_SIMULATOR || defined(__ANDROID__) || defined(__linux__)
+#if TARGET_OS_IOS || TARGET_OS_SIMULATOR || defined(__ANDROID__) || defined(__linux__) || TARGET_OS_OSX
 uint64_t now_us() {
     using namespace std::chrono;
     return duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
@@ -1579,7 +1579,7 @@ void registerGCClasses(ThreadGC* thgc) {
 }
 
 // GoThread - shared code for all platforms
-#if TARGET_OS_IOS || TARGET_OS_SIMULATOR || defined(__ANDROID__) || defined(__linux__)
+#if TARGET_OS_IOS || TARGET_OS_SIMULATOR || defined(__ANDROID__) || defined(__linux__) || TARGET_OS_OSX
 void* GoThread(ThreadGC* thgc) {
 #else
 CustomModuleImpl* GoThread(ThreadGC* thgc) {
@@ -2392,6 +2392,9 @@ CustomModuleImpl* GoThread(ThreadGC* thgc) {
         markLayoutOf(table2, local);
     };
 
+    SDL_Log("[GoThread] entering loop tid=%llu thgc=%p thgc->map=%p thgc->local=%p",
+            (unsigned long long)std::hash<std::thread::id>{}(std::this_thread::get_id()),
+            (void*)thgc, (void*)thgc->map, (void*)thgc->local);
     while (true) {
         auto start = std::chrono::high_resolution_clock::now();
         /*while (thgc->first != NULL) {
@@ -2426,7 +2429,7 @@ CustomModuleImpl* GoThread(ThreadGC* thgc) {
 void runGoThreadAsync(ThreadGC* thgc) {
     std::thread([thgc]() {
         initDone.get_future().wait();
-#if TARGET_OS_IOS || TARGET_OS_SIMULATOR || defined(__ANDROID__) || defined(__linux__)
+#if TARGET_OS_IOS || TARGET_OS_SIMULATOR || defined(__ANDROID__) || defined(__linux__) || TARGET_OS_OSX
         GoThread(thgc);
 #else
         CustomModuleImpl* result = GoThread(thgc);
@@ -2440,7 +2443,7 @@ void runGoThreadAsync(ThreadGC* thgc) {
         }).detach();
 }
 
-#if !TARGET_OS_IOS && !TARGET_OS_SIMULATOR && !defined(__ANDROID__) && !defined(__linux__)
+#if !TARGET_OS_IOS && !TARGET_OS_SIMULATOR && !defined(__ANDROID__) && !defined(__linux__) && !TARGET_OS_OSX
 // ============================================================
 // DllGoThread: 新規タブ用のイベントループ。
 //   - 自タブ専用の ThreadGC (= hoppy->push_tab で登録済み) を使う

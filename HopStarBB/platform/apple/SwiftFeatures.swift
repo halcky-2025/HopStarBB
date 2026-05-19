@@ -134,19 +134,19 @@ import SwiftUI
 
                 // Extract key landmarks
                 if let leftEye = landmarks.leftEye {
-                    result["leftEye"] = landmarkPoints(leftEye)
+                    result["leftEye"] = self.landmarkPoints(leftEye)
                 }
                 if let rightEye = landmarks.rightEye {
-                    result["rightEye"] = landmarkPoints(rightEye)
+                    result["rightEye"] = self.landmarkPoints(rightEye)
                 }
                 if let nose = landmarks.nose {
-                    result["nose"] = landmarkPoints(nose)
+                    result["nose"] = self.landmarkPoints(nose)
                 }
                 if let outerLips = landmarks.outerLips {
-                    result["outerLips"] = landmarkPoints(outerLips)
+                    result["outerLips"] = self.landmarkPoints(outerLips)
                 }
                 if let faceContour = landmarks.faceContour {
-                    result["faceContour"] = landmarkPoints(faceContour)
+                    result["faceContour"] = self.landmarkPoints(faceContour)
                 }
 
                 return result

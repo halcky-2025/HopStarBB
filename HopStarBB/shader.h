@@ -978,16 +978,18 @@ void renderAllCommands(
         if (isTilePass) {
             TiledTextureInfo* ti = shader_lookupTiledTexture(master, pass.tiledImageId);
             if (ti && pass.tileIndex < (int)ti->tiles.size()) {
-                // lazy 確保: tile.fbo が INVALID なら今ここで bgfx リソースを生成。
-                // (= createTiledOffscreenInternal が tile を pre-allocate しなくなったので、
-                //    描画直前にこの pass で初めて作る形)
-                shader_ensureTile(master, pass.tiledImageId, pass.tileIndex);
+                // eager 設計: tile.fbo は LayerInfo::push 時に shader_queueEnsureTile で
+                // キューに積まれ、render thread の beginFrame の processEnsureTileQueue で
+                // 確保済みのはず。ここでは確保せず、INVALID なら pass スキップ。
                 auto& tile = ti->tiles[pass.tileIndex];
                 if (bgfx::isValid(tile.fbo)) {
                     resolvedFbo = tile.fbo;
                     resolvedW = tile.size.x;
                     resolvedH = tile.size.y;
                     fboValid = true;
+                } else {
+                    SDL_Log("[renderAllCommands] tile fbo INVALID: imageId=%llu tileIdx=%d (eager queue miss?)",
+                            (unsigned long long)pass.tiledImageId, pass.tileIndex);
                 }
             }
             if (!fboValid) continue;

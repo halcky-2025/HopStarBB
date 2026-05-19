@@ -46,6 +46,10 @@
 #pragma comment(lib, "winhttp.lib")
 #else
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#include <TargetConditionals.h>
+#endif
 #include <sys/stat.h>
 #endif
 
@@ -1054,12 +1058,38 @@ private:
         m_deviceId = "android-device";
 #else
         const char* home = getenv("HOME");
+    #if defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_SIMULATOR)
+        // iOS sandbox: container root は read-only。Library/ 配下に置く必要あり。
+        m_internalStoragePath = home ? std::string(home) + "/Library/hopstarbb/storage" : "./hopstarbb/storage";
+        // リソースは app bundle 内 (Resources/)。NSBundle 経由でパス取得すべきだが、
+        // 各リソースを bundle ルートに直接配置している (fonts/, shaders/, imgs/) ので、
+        // bundle path を resource path として使う。
+        {
+            char bundlePath[2048] = {0};
+            uint32_t sz = sizeof(bundlePath);
+            if (_NSGetExecutablePath(bundlePath, &sz) == 0) {
+                m_resourcePath = fs::path(bundlePath).parent_path().string();
+            } else {
+                m_resourcePath = ".";
+            }
+        }
+    #else
         m_internalStoragePath = home ? std::string(home) + "/.hopstarbb/storage" : "./.hopstarbb/storage";
 
         char exePath[1024];
-        ssize_t len = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
-        if (len != -1) { exePath[len] = '\0'; m_resourcePath = fs::path(exePath).parent_path().string() + "/resources"; }
-        else { m_resourcePath = "./resources"; }
+        #if defined(__APPLE__)
+            uint32_t sz = sizeof(exePath);
+            if (_NSGetExecutablePath(exePath, &sz) == 0) {
+                m_resourcePath = fs::path(exePath).parent_path().string() + "/resources";
+            } else {
+                m_resourcePath = "./resources";
+            }
+        #else
+            ssize_t len = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
+            if (len != -1) { exePath[len] = '\0'; m_resourcePath = fs::path(exePath).parent_path().string() + "/resources"; }
+            else { m_resourcePath = "./resources"; }
+        #endif
+    #endif
 
         char hostname[256];
         m_deviceId = (gethostname(hostname, sizeof(hostname)) == 0) ? hostname : "unknown-device";
@@ -1231,6 +1261,16 @@ public:
         config.metadataDbPath = androidInternal ? std::string(androidInternal) + "/metadata.db" : "/data/local/tmp/hopstarbb/metadata.db";
 #else
         const char* home = getenv("HOME");
+    #if defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_SIMULATOR)
+        // iOS sandbox: container root は read-only。Library/ 配下に置く。
+        if (home) {
+            config.cacheDir = std::string(home) + "/Library/hopstarbb/cache";
+            config.metadataDbPath = std::string(home) + "/Library/hopstarbb/metadata.db";
+        } else {
+            config.cacheDir = "./hopstarbb/cache";
+            config.metadataDbPath = "./hopstarbb/metadata.db";
+        }
+    #else
         if (home) {
             config.cacheDir = std::string(home) + "/.hopstarbb/cache";
             config.metadataDbPath = std::string(home) + "/.hopstarbb/metadata.db";
@@ -1238,6 +1278,7 @@ public:
             config.cacheDir = "./.hopstarbb/cache";
             config.metadataDbPath = "./.hopstarbb/metadata.db";
         }
+    #endif
 #endif
         return create(config);
     }

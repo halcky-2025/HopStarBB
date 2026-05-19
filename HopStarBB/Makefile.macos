@@ -52,21 +52,17 @@ BGFX_LIB := $(BGFX_BUILD)/cmake/bgfx/libbgfx.a
 BX_LIB := $(BGFX_BUILD)/cmake/bx/libbx.a
 BIMG_LIB := $(BGFX_BUILD)/cmake/bimg/libbimg.a
 
-# PortAudio
-PORTAUDIO_DIR := $(LIBS_DIR)/portaudio
-PORTAUDIO_BUILD := $(PORTAUDIO_DIR)/build-macos
-PORTAUDIO_INCLUDE := $(PORTAUDIO_DIR)/include
-PORTAUDIO_LIB := $(PORTAUDIO_BUILD)/libportaudio.a
+# PortAudio (use system Homebrew installation)
+PORTAUDIO_INCLUDE := /opt/homebrew/include
+PORTAUDIO_LIB := /opt/homebrew/lib/libportaudio.a
 
 # nlohmann json
 JSON_INCLUDE := $(LIBS_DIR)/nlohmann
 
-# FFmpeg (built from source - no Homebrew dependency)
-FFMPEG_DIR := $(LIBS_DIR)/ffmpeg-kit/src/ffmpeg
-FFMPEG_BUILD := $(FFMPEG_DIR)/build-macos-static/output
-FFMPEG_INCLUDE := $(FFMPEG_BUILD)/include
-FFMPEG_LIB_DIR := $(FFMPEG_BUILD)/lib
-FFMPEG_LIBS := $(FFMPEG_LIB_DIR)/libavformat.a $(FFMPEG_LIB_DIR)/libavcodec.a $(FFMPEG_LIB_DIR)/libswscale.a $(FFMPEG_LIB_DIR)/libswresample.a $(FFMPEG_LIB_DIR)/libavutil.a $(FFMPEG_LIB_DIR)/libavfilter.a
+# FFmpeg (use system Homebrew installation - dynamic linking)
+FFMPEG_INCLUDE := /opt/homebrew/include
+FFMPEG_LIB_DIR := /opt/homebrew/lib
+FFMPEG_LIBS := -lavformat -lavcodec -lswscale -lswresample -lavutil -lavfilter -lavdevice
 
 # Compiler flags
 CXXFLAGS := -std=c++20 -O2 -g
@@ -114,6 +110,7 @@ LIBS += -lpthread
 LIBS += -liconv
 LIBS += -lbz2
 LIBS += -lz
+LIBS += -L/opt/homebrew/lib
 
 # Apple Frameworks
 FRAMEWORKS := -framework Foundation
@@ -144,12 +141,13 @@ FRAMEWORKS += -framework CoreServices
 FRAMEWORKS += -framework CoreFoundation
 
 # Source files
-SOURCES := main4.mm
+SOURCES := main.cpp
 SOURCES += platform/apple/AppleBridge.mm
 SOURCES += sqlite3.c
 
 # Object files
-OBJECTS := $(patsubst %.mm,build/%.o,$(filter %.mm,$(SOURCES)))
+OBJECTS := $(patsubst %.cpp,build/%.o,$(filter %.cpp,$(SOURCES)))
+OBJECTS += $(patsubst %.mm,build/%.o,$(filter %.mm,$(SOURCES)))
 OBJECTS += $(patsubst %.c,build/%.o,$(filter %.c,$(SOURCES)))
 
 # Build directory
@@ -163,8 +161,8 @@ check-deps:
 	@test -f $(SDL3_LIB) || (echo "Error: SDL3 not built. Run: make -f Makefile.macos deps" && exit 1)
 	@test -f $(BGFX_LIB) || (echo "Error: bgfx not built. Run: make -f Makefile.macos deps" && exit 1)
 	@test -f $(SDL3_TTF_LIB) || (echo "Error: SDL3_ttf not built. Run: make -f Makefile.macos deps" && exit 1)
-	@test -f $(PORTAUDIO_LIB) || (echo "Error: PortAudio not built. Run: make -f Makefile.macos deps" && exit 1)
-	@test -f $(FFMPEG_LIB_DIR)/libavcodec.a || (echo "Error: FFmpeg not built. Run: make -f Makefile.macos deps" && exit 1)
+	@test -f $(PORTAUDIO_LIB) || (echo "Error: PortAudio not found at $(PORTAUDIO_LIB)" && exit 1)
+	@test -f $(FFMPEG_LIB_DIR)/libavcodec.a || (echo "Error: FFmpeg not found at $(FFMPEG_LIB_DIR)" && exit 1)
 
 # Build all dependencies
 deps:
@@ -210,6 +208,11 @@ deps:
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/platform/apple
+
+# Compile C++ files (force Objective-C++ mode for macOS framework compatibility)
+build/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(OBJCXX) $(OBJCXXFLAGS) $(INCLUDES) -x objective-c++ -c $< -o $@
 
 # Compile Objective-C++ files
 build/%.o: %.mm

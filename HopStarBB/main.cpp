@@ -35,6 +35,40 @@ extern "C" {
 }
 #endif
 
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <mach-o/dyld.h>
+#include <limits.h>
+#include <string>
+#include <cstring>
+
+#ifndef BUNDLE_PATH_DEFINED
+#define BUNDLE_PATH_DEFINED
+inline std::string getExecutableDir_apple() {
+    char path[PATH_MAX];
+    uint32_t size = sizeof(path);
+    if (_NSGetExecutablePath(path, &size) == 0) {
+        char* lastSlash = strrchr(path, '/');
+        if (lastSlash) *lastSlash = '\0';
+        return std::string(path);
+    }
+    return ".";
+}
+
+inline std::string getBundlePath(const char* filename) {
+    std::string execDir = getExecutableDir_apple();
+    std::string path1 = execDir + "/" + filename;
+    if (access(path1.c_str(), F_OK) == 0) return path1;
+    std::string path2 = execDir + "/../Resources/" + filename;
+    if (access(path2.c_str(), F_OK) == 0) return path2;
+    if (access(filename, F_OK) == 0) return std::string(filename);
+    return std::string(filename);
+}
+#endif
+#endif
+
 #include <iostream>
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>          // SDL3 のエントリポイントマクロ (Android では必須)
@@ -77,7 +111,7 @@ namespace F = torch::nn::functional;
 #include "audio.h"
 #include "elem.h"
 
-#if defined(__ANDROID__) || defined(__linux__)
+#if defined(__ANDROID__) || defined(__linux__) || defined(__APPLE__)
 #include <thread>
 #include <chrono>
 #endif
@@ -381,6 +415,17 @@ int main(int argc, char** argv) {
         SDL_Window* window = SDL_CreateWindow("HopStarBB",
             1200, 800,
             SDL_WINDOW_BORDERLESS | SDL_WINDOW_RESIZABLE | SDL_WINDOW_VULKAN);
+#elif defined(__APPLE__)
+    #if TARGET_OS_IOS || TARGET_OS_SIMULATOR
+        // iOS: FULLSCREEN を付けるとステータスバー (時計) が隠れる。
+        // 付けなくても SDL は iOS で画面いっぱいに描画する (UIWindow 性質)。
+        SDL_Window* window = SDL_CreateWindow("HopStarBB", 0, 0,
+            SDL_WINDOW_METAL | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    #else
+        SDL_Window* window = SDL_CreateWindow("HopStarBB",
+            1200, 800,
+            SDL_WINDOW_BORDERLESS | SDL_WINDOW_RESIZABLE | SDL_WINDOW_METAL);
+    #endif
 #else
         SDL_Window* window = SDL_CreateWindow("SDL3 Example",
             1200, 800,
@@ -529,9 +574,9 @@ int main(int argc, char** argv) {
         }*/
 		int width, height;
         SDL_GetWindowSize(window, &width, &height);
-#ifdef __ANDROID__
-        // ★ Android: 初期 width/height は safe area サイズを使う (= ステータスバー /
-        //    ナビゲーションバー / cutout を除いた領域)。これにより、最初の
+#if defined(__ANDROID__) || (defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_SIMULATOR))
+        // ★ Android / iOS: 初期 width/height は safe area サイズを使う (= ステータスバー /
+        //    ノッチ / cutout を除いた領域)。これにより、最初の
         //    buildFrame が走る前から mainWin->size / mainLocal->size が safe area
         //    サイズになり、初回 layout から正しいサイズで組まれる
         //    (= 初フレーム描画が下に突き抜けない)。
@@ -540,12 +585,17 @@ int main(int argc, char** argv) {
         {
             SDL_Rect safe;
             if (SDL_GetWindowSafeArea(window, &safe) && safe.w > 0 && safe.h > 0) {
-                SDL_Log("[Android-init] window=%dx%d safe=(%d,%d %dx%d)",
+                SDL_Log("[Mobile-init] window=%dx%d safe=(%d,%d %dx%d)",
                         width, height, safe.x, safe.y, safe.w, safe.h);
                 width = safe.w;
+#if defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_SIMULATOR)
+                // iOS: ホームインジケータ領域も UI で使う (= bottom inset 無視)。
+                height = height - safe.y;
+#else
                 height = safe.h;
+#endif
             } else {
-                SDL_Log("[Android-init] safe area not available, using window size %dx%d",
+                SDL_Log("[Mobile-init] safe area not available, using window size %dx%d",
                         width, height);
             }
         }
@@ -556,6 +606,12 @@ int main(int argc, char** argv) {
         {
             float dispScale = SDL_GetWindowDisplayScale(window);
             if (dispScale <= 0.0f) dispScale = 1.0f;
+#if defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_SIMULATOR)
+            // iOS では bgfx を point 解像度で動かしている (HIGH_PIXEL_DENSITY 付けても
+            // bgfx::reset の引数は point)。UI スケール = 1.0 で 1pt = 1 unit が自然なサイズ。
+            // retina スケール 3.0 を乗じると全要素が 3 倍になって巨大化する。
+            dispScale = 1.0f;
+#endif
             SetUiScale(dispScale);
             SDL_Log("UI scale = %f (window %dx%d)", dispScale, width, height);
         }
@@ -597,6 +653,8 @@ int main(int argc, char** argv) {
                 mainWin->nwh = SDL_GetPointerProperty(mainProps, "SDL.window.wayland.surface", nullptr);
             }
         }
+#elif defined(__APPLE__)
+        mainWin->nwh = SDL_GetPointerProperty(mainProps, "SDL.window.cocoa.window", nullptr);
 #else
         mainWin->nwh = nullptr;
 #endif
@@ -761,8 +819,21 @@ int main(int argc, char** argv) {
         RenderThread* render = new RenderThread(hoppy, window);
         render->start();
         s_eventWatchCtx.render = render;
+#if defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_SIMULATOR)
+        // iOS: CADisplayLink を SDL3 が内部で立てて、毎フレーム main thread で
+        // この callback を呼ぶ。bgfx single-thread mode と整合する。
+        // 60Hz CADisplayLink。renderOneFrame は render==0 のとき何もせず return するので
+        // idle 時は実質負荷ゼロ。アニメ・タップ時だけ実描画。
+        SDL_SetiOSAnimationCallback(window, 1, [](void* ud) {
+            auto* r = (RenderThread*)ud;
+            if (r) r->renderOneFrame();
+        }, render);
+        SDL_Log("iOS: SDL_SetiOSAnimationCallback registered");
+#endif
 		runGoThreadAsync(magc);
-        SDL_Log("Entering main event loop");
+        SDL_Log("Entering main event loop tid=%llu mainGC=%p magc=%p",
+                (unsigned long long)std::hash<std::thread::id>{}(std::this_thread::get_id()),
+                (void*)hoppy->mainGC, (void*)magc);
         while (running) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             /*for (int i = 0; i < WORKER_COUNT; i++) {
@@ -922,9 +993,9 @@ int main(int argc, char** argv) {
                 else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
                     float tapX = (float)event.button.x;
                     float tapY = (float)event.button.y;
-#ifdef __ANDROID__
-                    // Android: touch 座標は raw SurfaceView 座標 (上 0 起点) で届くが、
-                    // UI レイアウトは safe area 内座標 (上のステータスバー分シフト済み)。
+#if defined(__ANDROID__) || (defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_SIMULATOR))
+                    // Android / iOS: touch 座標は raw window 座標 (上 0 起点) で届くが、
+                    // UI レイアウトは safe area 内座標 (上のステータスバー / ノッチ分シフト済み)。
                     // viewport offset (= g_backbufferViewOffsetX/Y) を引いて UI 座標に合わせる。
                     extern int g_backbufferViewOffsetX;
                     extern int g_backbufferViewOffsetY;
@@ -1043,10 +1114,18 @@ int main(int argc, char** argv) {
                                     req->resultNwh = SDL_GetPointerProperty(props, "SDL.window.wayland.surface", nullptr);
                                 }
                             }
+#elif defined(__APPLE__)
+                            req->resultNwh = SDL_GetPointerProperty(props, "SDL.window.cocoa.window", nullptr);
 #else
                             req->resultNwh = nullptr;
 #endif
-                            if (req->visible) SDL_ShowWindow(sdlWin);
+                            if (req->visible) {
+                                SDL_ShowWindow(sdlWin);
+                            } else {
+                                // SDL3 macOS: SDL_CreatePopupWindow の SDL_WINDOW_HIDDEN フラグが
+                                // 効かないことがあるため、明示的に Hide する。
+                                SDL_HideWindow(sdlWin);
+                            }
                         }
                         req->resultSDLWindow = sdlWin;
                         req->success = (sdlWin != nullptr);

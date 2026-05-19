@@ -26,7 +26,26 @@
 #ifdef __APPLE__
 #include <TargetConditionals.h>
 #if TARGET_OS_IOS || TARGET_OS_SIMULATOR || TARGET_OS_MAC
+// Guard against CarbonCore type conflicts with project types (Comment, CommentType).
+// AIFF.h defines 'struct Comment' and Script.h defines 'typedef ... CommentType'
+// which conflict with identically-named types in Compile.h.
+#ifndef __AIFF__
+#define __AIFF__
+#define HOPSTAR_UNDEF_AIFF
+#endif
+#ifndef __SCRIPT__
+#define __SCRIPT__
+#define HOPSTAR_UNDEF_SCRIPT
+#endif
 #import <Foundation/Foundation.h>
+#ifdef HOPSTAR_UNDEF_AIFF
+#undef __AIFF__
+#undef HOPSTAR_UNDEF_AIFF
+#endif
+#ifdef HOPSTAR_UNDEF_SCRIPT
+#undef __SCRIPT__
+#undef HOPSTAR_UNDEF_SCRIPT
+#endif
 #endif
 #endif
 

@@ -653,6 +653,25 @@ bool initBgfx(SDL_Window* window) {
             s_metalView = SDL_Metal_CreateView(window);
             metalLayer = SDL_Metal_GetLayer(s_metalView);
             SDL_GetWindowSize(window, &width, &height);
+            // ★ Option B: 黒の静的 UIView を status bar 領域に被せる。
+            //   metalView 上に置くことで、iOS は status bar を黒 UIView の上に描画。
+            //   この UIView は static で毎フレーム更新しないので bgfx present との
+            //   競合が起きず、点滅しない。
+            {
+                UIView* mv = (__bridge UIView*)s_metalView;
+                UIView* parent = mv.superview;
+                if (parent) {
+                    CGFloat topInset = parent.safeAreaInsets.top;
+                    if (topInset > 0) {
+                        UIView* bar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, parent.bounds.size.width, topInset)];
+                        bar.backgroundColor = [UIColor blackColor];
+                        bar.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+                        bar.userInteractionEnabled = NO;  // タップを下に通す
+                        [parent addSubview:bar];  // metalView より後に追加 = 上に乗る
+                        SDL_Log("initBgfx: status bar overlay added, topInset=%.0f", topInset);
+                    }
+                }
+            }
             SDL_Log("initBgfx: iOS metalView=%p, metalLayer=%p, size=%dx%d",
                     s_metalView, metalLayer, width, height);
 
@@ -666,10 +685,8 @@ bool initBgfx(SDL_Window* window) {
             memset(&pdLocal, 0, sizeof(pdLocal));
             pdLocal.nwh = metalLayer;
 
-            // iOS single-thread mode: call renderFrame() before init()
-            // This prevents bgfx from creating internal render thread
-            bgfx::renderFrame();
-
+            // iOS multi-thread mode: bgfx internal render thread に任せる。
+            // (single-thread mode 試したが simulator 上で present が機能しなかった)
             bgfx::Init initLocal;
             initLocal.platformData = pdLocal;
             initLocal.type = bgfx::RendererType::Metal;
@@ -685,6 +702,16 @@ bool initBgfx(SDL_Window* window) {
                 // Force depth buffer creation via reset
                 bgfx::reset(width, height, BGFX_RESET_VSYNC, bgfx::TextureFormat::D24S8);
                 SDL_Log("bgfx reset with depth buffer");
+                // 共通: view 0 (= backbuffer) の clear / rect / first frame を設定。
+                // macOS 経路と揃える。これがないと iOS で view 0 がどこにも setup されず
+                // bgfx::frame() しても画面に何も出ない (= 黒) になる。
+                // ★ デバッグ: clear color を赤にして、bgfx の clear が実際に画面に
+                //   出ているか可視チェック。出ない場合は drawable/present が機能してない。
+                bgfx::setViewClear(0, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x000000ff, 1.0f, 0);
+                bgfx::setViewRect(0, 0, 0, (uint16_t)width, (uint16_t)height);
+                bgfx::touch(0);
+                bgfx::frame();
+                SDL_Log("iOS: First frame submitted");
             } else {
                 SDL_Log("bgfx::init failed");
             }
@@ -1161,9 +1188,9 @@ public:
             int layerW = 0, layerH = 0;
             if (!mainGC->windows.empty() && mainGC->windows[0]) {
                 NativeWindow* mw = mainGC->windows[0];
-#if defined(__ANDROID__)
-                // Android: safe area (= ステータスバー / ナビゲーションバー /
-                // cutout を除いた領域) を毎フレーム取得し:
+#if defined(__ANDROID__) || (defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_SIMULATOR))
+                // Android / iOS: safe area (= ステータスバー / ノッチ /
+                // ホームインジケータ / cutout を除いた領域) を毎フレーム取得し:
                 //   - mw->size を safe area サイズに同期 (= layout が safe area 内で組まれる)
                 //   - g_backbufferViewOffsetX/Y に safe area の (x, y) を保存
                 //     (= bgfx viewport を safe area 位置にオフセットし、UI が
@@ -1179,6 +1206,11 @@ public:
                         safe.x = safe.y = 0; safe.w = fullW; safe.h = fullH;
                     }
                     int newW = safe.w, newH = safe.h;
+#if defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_SIMULATOR)
+                    // iOS: ホームインジケータ領域には UI を伸ばす (= bottom inset 無視)。
+                    // 上のノッチ/ステータスバー分だけ avoid する。
+                    newH = fullH - safe.y;
+#endif
                     static int s_logged = 0;
                     if (s_logged < 5 || mw->size.x != newW || mw->size.y != newH) {
                         SDL_Log("[SafeArea] frame=%llu full=%dx%d safe=(%d,%d %dx%d) ok=%d mw->size=%dx%d",
@@ -1261,8 +1293,8 @@ public:
                 graphic.deltaTime = this->deltaTime;
                 graphic.paint = screen->paint;
                 graphic.zIndex = 0.0f;
-#if defined(__ANDROID__)
-                // Android: popup を mainWin の上にオーバーレイ描画。
+#if defined(__ANDROID__) || (defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_SIMULATOR))
+                // Android / iOS: popup を mainWin の上にオーバーレイ描画。
                 //   - fb/fbsize は mainWin のものを使う (= main backbuffer に直接書く)
                 //   - zIndex は十分高い値 (= 通常 UI より前面に出る)
                 //   - popup の絶対位置 (anchor) は myCreatePopupWindow / myMoveWindow
@@ -1690,7 +1722,21 @@ public:
     bool resources_initialized_ = false;
 
     void renderOneFrame() {
+        static int s_callCount = 0;
+        s_callCount++;
+        if (s_callCount == 1 || s_callCount == 60) {
+            SDL_Log("[renderOneFrame] call #%d running=%d initialized=%d", s_callCount, (int)running_, (int)initialized_);
+        }
         if (!running_ || !initialized_) return;
+#if TARGET_OS_IOS || TARGET_OS_SIMULATOR
+        // 省電力: GoThread が新 frame を publish していない (= render==0) なら
+        // 何もせず return。drawable は前のフレームを保持。bgfx::frame() も呼ばない。
+        // render > 0 のときは consume しないと GoThread の waitAcquired が永久 block。
+        if (hoppy_ && hoppy_->render.load(std::memory_order_acquire) == 0) {
+            return;
+        }
+        bgfx::touch(0);
+#endif
 
         // Initialize resources once
         if (!resources_initialized_) {
@@ -1736,6 +1782,11 @@ public:
             auto render_items = renderer_->get_render_items();
 
             // Setup view 30 for video rendering (with depth buffer)
+            // ★ view 30 は CLEAR_COLOR を外す: 元コードは画面全体を灰色 (0x303030)
+            //   で塗っていたため、UI を描画してる view 0 を完全に上書きしてしまい
+            //   「動画/音声を流している間 UI が消える」状態だった。
+            //   view 30 は backbuffer を共有してるので、UI 描画の上に動画フレームだけを
+            //   サブミットすれば良い (= clear なしで blend)。
             if (!render_items.empty()) {
                 int winW, winH;
                 SDL_GetWindowSize(window_, &winW, &winH);
@@ -1743,7 +1794,7 @@ public:
                 width_ = winW;
                 height_ = winH;
                 bgfx::setViewFrameBuffer(30, BGFX_INVALID_HANDLE);
-                bgfx::setViewClear(30, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x303030ff, 1.0f, 0);
+                bgfx::setViewClear(30, BGFX_CLEAR_DEPTH, 0x00000000, 1.0f, 0);  // clear depth only
                 bgfx::setViewRect(30, 0, 0, uint16_t(winW), uint16_t(winH));
                 float orthoProj[16];
                 bx::mtxOrtho(orthoProj, 0.0f, float(winW), float(winH), 0.0f, 0.0f, 100.0f, 0.0f, bgfx::getCaps()->homogeneousDepth);
@@ -2375,8 +2426,8 @@ NativeWindow* myCreatePopupWindow(ThreadGC* thgc, NativeWindowType type, PopupAn
     GC_add_root(nw->rootNode, (char**)&nw->local);
     GC_add_root(nw->rootNode, (char**)&nw->anchorElement);
 
-#if defined(__ANDROID__)
-    // Android では SDL_CreatePopupWindow が無いので、別 OS window を作らない。
+#if defined(__ANDROID__) || (defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_SIMULATOR))
+    // Android / iOS では SDL_CreatePopupWindow が実用的でないので別 OS window を作らない。
     // 代わりに mainWin の SDL window / FBO / nwh / viewId を共有して、popup を
     // **十分に高い zIndex でメイン画面にオーバーレイ描画** する。
     // popup の anchor 位置は描画側 (ElementDraw 等) が anchorX/Y を起点に絶対座標で配置する。
@@ -2454,8 +2505,8 @@ void myShowWindow(ThreadGC* thgc, NativeWindow* nw) {
     // popup を出した直後は buildFrame で measure / paint を回さないと内容が空 (= 黒) のまま
     // publish されてしまうので、必ず invalidate を立てる。
     if (thgc && thgc->hoppy) thgc->hoppy->invalidate = HopStar::kInvalidateFrames;
-#if defined(__ANDROID__)
-    // Android: 別 OS window が無いので、SDL_ShowWindow ではなく直接 visible を立てる。
+#if defined(__ANDROID__) || (defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_SIMULATOR))
+    // Android / iOS: 別 OS window が無いので、SDL_ShowWindow ではなく直接 visible を立てる。
     // GoThread で同期更新するので drawScreen は同フレームから popup を render する
     auto& op = thgc->openPopups;
     if (std::find(op.begin(), op.end(), nw) == op.end()) {
@@ -2492,8 +2543,8 @@ void myShowWindow(ThreadGC* thgc, NativeWindow* nw) {
 // ウィンドウ非表示（キューに積むだけ、ブロックしない）
 void myHideWindow(ThreadGC* thgc, NativeWindow* nw) {
     if (!nw) return;
-#if defined(__ANDROID__)
-    // Android: 直接 visible を落とす + openPopups からも削除。
+#if defined(__ANDROID__) || (defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_SIMULATOR))
+    // Android / iOS: 直接 visible を落とす + openPopups からも削除。
     nw->visible = false;
     auto& op = thgc->openPopups;
     op.erase(std::remove(op.begin(), op.end(), nw), op.end());
@@ -2529,8 +2580,8 @@ void myMoveWindow(ThreadGC* thgc, NativeWindow* nw, int x, int y) {
     // anchor 値は常に更新 (drawScreen 等が anchorX/Y を直接参照するので両プラットフォームで必要)
     nw->anchorX = x;
     nw->anchorY = y;
-#if defined(__ANDROID__)
-    // Android: 別 OS window が無いので SDL_SetWindowPosition は意味なし。
+#if defined(__ANDROID__) || (defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_SIMULATOR))
+    // Android / iOS: 別 OS window が無いので SDL_SetWindowPosition は意味なし。
     // 代わりに popup elem の pos を更新 → getAbsolutePosition が新位置を返す。
     if (nw->local) {
         nw->local->pos.x = (float)x;

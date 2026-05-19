@@ -1,342 +1,583 @@
-name: HopStar
+name: HopStarBB
 options:
-  bundleIdPrefix: com.hopstar
-  deploymentTarget:
-    iOS: "17.0"
-    macOS: "14.0"
-  xcodeVersion: "15.0"
+  bundleIdPrefix: com.hopstarbb
+  createIntermediateGroups: true
   generateEmptyDirectories: true
-  groupSortPosition: top
+  xcodeVersion: "15.0"
 
-settings:
-  base:
-    CLANG_CXX_LANGUAGE_STANDARD: c++20
-    CLANG_CXX_LIBRARY: libc++
-    GCC_C_LANGUAGE_STANDARD: c11
-    CLANG_ENABLE_MODULES: YES
-    CLANG_ENABLE_OBJC_ARC: YES
-    SWIFT_VERSION: "5.0"
-    ENABLE_BITCODE: NO
-    DEAD_CODE_STRIPPING: YES
-
-# =============================================================================
-# Targets
-# =============================================================================
 targets:
-
-  # ===========================================================================
-  # macOS Target
-  # ===========================================================================
-  HopStar-macOS:
+  # ============================================================
+  # macOS: Xcode native build
+  # ============================================================
+  HopStarBB:
     type: application
     platform: macOS
     deploymentTarget: "14.0"
-
-    sources:
-      - path: main4.mm
-        buildPhase: sources
-      - path: platform/apple/AppleBridge.mm
-        buildPhase: sources
-      - path: sqlite3.c
-        buildPhase: sources
-      - path: shaders/vs_unite2_mtl.bin
-        buildPhase: resources
-      - path: shaders/fs_unite2_mtl.bin
-        buildPhase: resources
-      - path: pyonpyon.mp4
-        buildPhase: resources
-      - path: 123.png
-        buildPhase: resources
-      - path: fonts/NotoSansJP-Regular.ttf
-        buildPhase: resources
-      - path: fonts/NotoSerifJP-Regular.ttf
-        buildPhase: resources
-      - path: fonts/RobotoMono-Regular.ttf
-        buildPhase: resources
-
-    settings:
-      base:
-        PRODUCT_NAME: HopStar
-        PRODUCT_BUNDLE_IDENTIFIER: com.hopstar.editor.macos
-        INFOPLIST_FILE: platform/apple/Info-macOS.plist
-        CODE_SIGN_STYLE: Automatic
-        MACOSX_DEPLOYMENT_TARGET: "14.0"
-        COMBINE_HIDPI_IMAGES: YES
-        ENABLE_HARDENED_RUNTIME: NO
-        # C++ settings
-        CLANG_CXX_LANGUAGE_STANDARD: c++20
-        GCC_ENABLE_CPP_EXCEPTIONS: YES
-        GCC_ENABLE_CPP_RTTI: YES
-        DEFINES_MODULE: YES
-        # Preprocessor definitions
-        GCC_PREPROCESSOR_DEFINITIONS:
-          - "$(inherited)"
-          - "SDL_MAIN_HANDLED"
-          - "BX_CONFIG_DEBUG=0"
-          - "TARGET_OS_OSX=1"
-          - "HOPSTAR_ENABLE_FFMPEG"
-        # Header search paths
-        HEADER_SEARCH_PATHS:
-          - "$(inherited)"
-          - "$(PROJECT_DIR)"
-          - "$(PROJECT_DIR)/platform/apple"
-          - "$(PROJECT_DIR)/libs/SDL3/include"
-          - "$(PROJECT_DIR)/libs/SDL3_ttf/include"
-          - "$(PROJECT_DIR)/libs/SDL3_ttf/external/freetype/include"
-          - "$(PROJECT_DIR)/libs/SDL3_ttf/external/harfbuzz/src"
-          - "$(PROJECT_DIR)/libs/bgfx.cmake/bgfx/include"
-          - "$(PROJECT_DIR)/libs/bgfx.cmake/bx/include"
-          - "$(PROJECT_DIR)/libs/bgfx.cmake/bx/include/compat/osx"
-          - "$(PROJECT_DIR)/libs/bgfx.cmake/bimg/include"
-          - "$(PROJECT_DIR)/libs/portaudio/include"
-          - "$(PROJECT_DIR)/libs/nlohmann"
-          - "$(PROJECT_DIR)/libs/ffmpeg-kit/src/ffmpeg/build-macos-static/output/include"
-        # Library search paths
-        LIBRARY_SEARCH_PATHS:
-          - "$(inherited)"
-          - "$(PROJECT_DIR)/libs/SDL3/build-macos"
-          - "$(PROJECT_DIR)/libs/SDL3_ttf/build-macos"
-          - "$(PROJECT_DIR)/libs/SDL3_ttf/build-macos/external/freetype-build"
-          - "$(PROJECT_DIR)/libs/SDL3_ttf/build-macos/external/harfbuzz-build"
-          - "$(PROJECT_DIR)/libs/SDL3_ttf/build-macos/external/plutosvg-guild"
-          - "$(PROJECT_DIR)/libs/SDL3_ttf/build-macos/external/plutovg-build"
-          - "$(PROJECT_DIR)/libs/bgfx.cmake/build-macos/cmake/bgfx"
-          - "$(PROJECT_DIR)/libs/bgfx.cmake/build-macos/cmake/bimg"
-          - "$(PROJECT_DIR)/libs/bgfx.cmake/build-macos/cmake/bx"
-          - "$(PROJECT_DIR)/libs/portaudio/build-macos"
-          - "$(PROJECT_DIR)/libs/ffmpeg-kit/src/ffmpeg/build-macos-static/output/lib"
-        # Other linker flags
-        OTHER_LDFLAGS:
-          - "$(inherited)"
-          - "-lSDL3"
-          - "-lSDL3_ttf"
-          - "-lfreetype"
-          - "-lharfbuzz"
-          - "-lplutosvg"
-          - "-lplutovg"
-          - "-lbgfx"
-          - "-lbimg"
-          - "-lbx"
-          - "-lportaudio"
-          - "-lavformat"
-          - "-lavcodec"
-          - "-lswscale"
-          - "-lswresample"
-          - "-lavutil"
-          - "-lavfilter"
-          - "-liconv"
-          - "-lbz2"
-          - "-lz"
-          - "-framework Foundation"
-          - "-framework AppKit"
-          - "-framework Metal"
-          - "-framework MetalKit"
-          - "-framework QuartzCore"
-          - "-framework CoreGraphics"
-          - "-framework CoreVideo"
-          - "-framework CoreMedia"
-          - "-framework CoreAudio"
-          - "-framework AudioToolbox"
-          - "-framework AudioUnit"
-          - "-framework AVFoundation"
-          - "-framework VideoToolbox"
-          - "-framework CoreML"
-          - "-framework Vision"
-          - "-framework Photos"
-          - "-framework UserNotifications"
-          - "-framework IOKit"
-          - "-framework Carbon"
-          - "-framework ForceFeedback"
-          - "-framework GameController"
-          - "-framework CoreHaptics"
-          - "-framework UniformTypeIdentifiers"
-          - "-framework Security"
-          - "-framework CoreServices"
-          - "-framework CoreFoundation"
-
-    dependencies: []
-
     info:
       path: platform/apple/Info-macOS.plist
-      properties:
-        CFBundleName: HopStar
-        CFBundleDisplayName: HopStar
-        CFBundleIdentifier: com.hopstar.editor.macos
-        CFBundleVersion: "1"
-        CFBundleShortVersionString: "1.0"
-        NSHighResolutionCapable: true
+    sources:
+      - path: main.cpp
+      - path: sqlite3.c
+      - path: platform/apple/AppleBridge.mm
+      - path: AppDelegate.h
+        buildPhase: none
+      - path: AppDelegate.mm
+        buildPhase: none
+      - path: Compile.h
+        buildPhase: none
+      - path: addelem.h
+        buildPhase: none
+      - path: arr.h
+        buildPhase: none
+      - path: arr2.h
+        buildPhase: none
+      - path: audio.h
+        buildPhase: none
+      - path: co.cpp
+        buildPhase: none
+      - path: cobj2a.h
+        buildPhase: none
+      - path: cobj2b.h
+        buildPhase: none
+      - path: cobj2c.h
+        buildPhase: none
+      - path: command_queue.h
+        buildPhase: none
+      - path: db.h
+        buildPhase: none
+      - path: db2.h
+        buildPhase: none
+      - path: elem.h
+        buildPhase: none
+      - path: encode.h
+        buildPhase: none
+      - path: extorch.h
+        buildPhase: none
+      - path: f16c_shortname.h
+        buildPhase: none
+      - path: file_engine.h
+        buildPhase: none
+      - path: file_io_async.h
+        buildPhase: none
+      - path: gc.h
+        buildPhase: none
+      - path: gc2.h
+        buildPhase: none
+      - path: gui.h
+        buildPhase: none
+      - path: http_client.h
+        buildPhase: none
+      - path: http_client_curl.h
+        buildPhase: none
+      - path: http_server.h
+        buildPhase: none
+      - path: imas.h
+        buildPhase: none
+      - path: lldb.h
+        buildPhase: none
+      - path: lldbdriver.h
+        buildPhase: none
+      - path: llvm.h
+        buildPhase: none
+      - path: main.cpp
+        buildPhase: none
+      - path: main3.mm
+        buildPhase: none
+      - path: main4.mm
+        buildPhase: none
+      - path: main5.cpp
+        buildPhase: none
+      - path: main7.cpp
+        buildPhase: none
+      - path: media_processor.h
+        buildPhase: none
+      - path: mem.h
+        buildPhase: none
+      - path: miniaudio.h
+        buildPhase: none
+      - path: newelem.h
+        buildPhase: none
+      - path: obj1a.h
+        buildPhase: none
+      - path: obj1b.h
+        buildPhase: none
+      - path: obj1c.h
+        buildPhase: none
+      - path: obj2a.h
+        buildPhase: none
+      - path: obj2b.h
+        buildPhase: none
+      - path: obj2c.h
+        buildPhase: none
+      - path: objvt.h
+        buildPhase: none
+      - path: objz.h
+        buildPhase: none
+      - path: opt.h
+        buildPhase: none
+      - path: othelem.h
+        buildPhase: none
+      - path: platform_io.h
+        buildPhase: none
+      - path: server_common.h
+        buildPhase: none
+      - path: shader.h
+        buildPhase: none
+      - path: shader2.h
+        buildPhase: none
+      - path: sqlite3.c
+        buildPhase: none
+      - path: sqlite3.h
+        buildPhase: none
+      - path: state.h
+        buildPhase: none
+      - path: stb_image.h
+        buildPhase: none
+      - path: stb_image_write.h
+        buildPhase: none
+      - path: test_pp.h
+        buildPhase: none
+      - path: test_thumbnail.cpp
+        buildPhase: none
+      - path: thread_pool.h
+        buildPhase: none
+      - path: threed.h
+        buildPhase: none
+      - path: thumnailAtlas.h
+        buildPhase: none
+      - path: tiny_gltf.h
+        buildPhase: none
+      - path: ugui.h
+        buildPhase: none
+      - path: webrtc_manager.h
+        buildPhase: none
+      - path: websocket_client.h
+        buildPhase: none
+      - path: websocket_server.h
+        buildPhase: none
+      - path: platform/apple/AppleBridge.h
+        buildPhase: none
+      - path: platform/apple/AppDelegate.h
+        buildPhase: none
+      - path: platform/apple/AppDelegate.mm
+        buildPhase: none
+    settings:
+      base:
+        PRODUCT_NAME: HopStar_macOS
+        PRODUCT_BUNDLE_IDENTIFIER: com.hayakawa.syou1.hopstarbb
+        CLANG_CXX_LANGUAGE_STANDARD: c++20
+        CLANG_ENABLE_OBJC_ARC: YES
+        GCC_ENABLE_CPP_EXCEPTIONS: YES
+        GCC_ENABLE_CPP_RTTI: YES
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - $(inherited)
+          - SDL_MAIN_HANDLED=1
+          - BX_CONFIG_DEBUG=0
+          - TARGET_OS_OSX=1
+          - HOPSTAR_ENABLE_FFMPEG
+        OTHER_CPLUSPLUSFLAGS:
+          - $(inherited)
+          - -x
+          - objective-c++
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: VXVZ9S5JUL
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(PROJECT_DIR)
+          - $(PROJECT_DIR)/platform/apple
+          - $(PROJECT_DIR)/libs/SDL3/include
+          - $(PROJECT_DIR)/libs/SDL3_ttf/include
+          - $(PROJECT_DIR)/libs/SDL3_ttf/external/freetype/include
+          - $(PROJECT_DIR)/libs/SDL3_ttf/external/harfbuzz/src
+          - $(PROJECT_DIR)/libs/bgfx.cmake/bgfx/include
+          - $(PROJECT_DIR)/libs/bgfx.cmake/bx/include
+          - $(PROJECT_DIR)/libs/bgfx.cmake/bimg/include
+          - $(PROJECT_DIR)/libs/nlohmann
+          - /opt/homebrew/include
+        LIBRARY_SEARCH_PATHS:
+          - $(inherited)
+          - $(PROJECT_DIR)/libs/SDL3/build-macos
+          - $(PROJECT_DIR)/libs/SDL3_ttf/build-macos
+          - $(PROJECT_DIR)/libs/SDL3_ttf/build-macos/external/freetype-build
+          - $(PROJECT_DIR)/libs/SDL3_ttf/build-macos/external/harfbuzz-build
+          - $(PROJECT_DIR)/libs/SDL3_ttf/build-macos/external/plutosvg-guild
+          - $(PROJECT_DIR)/libs/SDL3_ttf/build-macos/external/plutovg-build
+          - $(PROJECT_DIR)/libs/bgfx.cmake/build-macos/cmake/bgfx
+          - $(PROJECT_DIR)/libs/bgfx.cmake/build-macos/cmake/bx
+          - $(PROJECT_DIR)/libs/bgfx.cmake/build-macos/cmake/bimg
+          - /opt/homebrew/lib
+        OTHER_LDFLAGS:
+          - $(inherited)
+          - -lSDL3
+          - -lSDL3_ttf
+          - -lfreetype
+          - -lharfbuzz
+          - -lplutosvg
+          - -lplutovg
+          - -lbgfx
+          - -lbimg
+          - -lbx
+          - /opt/homebrew/lib/libportaudio.a
+          - -lavformat
+          - -lavcodec
+          - -lswscale
+          - -lswresample
+          - -lavutil
+          - -lavfilter
+          - -lavdevice
+          - -liconv
+          - -lbz2
+          - -lz
+    dependencies:
+      - sdk: Foundation.framework
+      - sdk: AppKit.framework
+      - sdk: Metal.framework
+      - sdk: MetalKit.framework
+      - sdk: QuartzCore.framework
+      - sdk: CoreGraphics.framework
+      - sdk: CoreVideo.framework
+      - sdk: CoreMedia.framework
+      - sdk: CoreAudio.framework
+      - sdk: AudioToolbox.framework
+      - sdk: AudioUnit.framework
+      - sdk: AVFoundation.framework
+      - sdk: VideoToolbox.framework
+      - sdk: CoreML.framework
+      - sdk: Vision.framework
+      - sdk: Photos.framework
+      - sdk: UserNotifications.framework
+      - sdk: IOKit.framework
+      - sdk: Carbon.framework
+      - sdk: ForceFeedback.framework
+      - sdk: GameController.framework
+      - sdk: CoreHaptics.framework
+      - sdk: UniformTypeIdentifiers.framework
+      - sdk: Security.framework
+      - sdk: CoreServices.framework
+      - sdk: CoreFoundation.framework
 
-    entitlements:
-      path: platform/apple/HopStar-macOS.entitlements
-
-  # ===========================================================================
-  # iOS Target
-  # ===========================================================================
-  HopStar-iOS:
+  # ============================================================
+  # iOS Simulator: Xcode native build
+  # ============================================================
+  HopStarBB-iOS:
     type: application
     platform: iOS
     deploymentTarget: "17.0"
-
-    sources:
-      - path: main3.mm
-        buildPhase: sources
-      - path: platform/apple/AppDelegate.mm
-        buildPhase: sources
-      - path: platform/apple/AppleBridge-ObjC.m
-        buildPhase: sources
-      - path: platform/apple/portaudio_ios.mm
-        buildPhase: sources
-      - path: platform/apple/Dummy.swift
-        buildPhase: sources
-      - path: platform/apple/AppDelegate.h
-        buildPhase: headers
-      - path: platform/apple/AppleBridge-Swift.h
-        buildPhase: headers
-      - path: platform/apple/LaunchScreen.storyboard
-        buildPhase: resources
-      - path: shaders/vs_unite2_mtl.bin
-        buildPhase: resources
-      - path: shaders/fs_unite2_mtl.bin
-        buildPhase: resources
-      - path: pyonpyon.mp4
-        buildPhase: resources
-      - path: 123.png
-        buildPhase: resources
-      - path: fonts/NotoSansJP-Regular.ttf
-        buildPhase: resources
-      - path: fonts/NotoSerifJP-Regular.ttf
-        buildPhase: resources
-      - path: fonts/RobotoMono-Regular.ttf
-        buildPhase: resources
-
-    settings:
-      base:
-        PRODUCT_NAME: HopStar
-        PRODUCT_BUNDLE_IDENTIFIER: com.hopstar.editor.ios
-        INFOPLIST_FILE: platform/apple/Info-iOS.plist
-        CODE_SIGN_STYLE: Automatic
-        IPHONEOS_DEPLOYMENT_TARGET: "17.0"
-        TARGETED_DEVICE_FAMILY: "1,2"
-        # C++ settings
-        CLANG_CXX_LANGUAGE_STANDARD: c++20
-        GCC_ENABLE_CPP_EXCEPTIONS: YES
-        GCC_ENABLE_CPP_RTTI: YES
-        DEFINES_MODULE: YES
-        # Preprocessor definitions for bx/bgfx
-        GCC_PREPROCESSOR_DEFINITIONS:
-          - "$(inherited)"
-          - "BX_CONFIG_DEBUG=0"
-        # Header search paths (SDL3_ttf before stubs to use real TTF)
-        HEADER_SEARCH_PATHS:
-          - "$(inherited)"
-          - "$(PROJECT_DIR)/libs/SDL3_ttf/include"
-          - "$(PROJECT_DIR)/platform/apple/stubs"
-          - "$(PROJECT_DIR)"
-          - "$(PROJECT_DIR)/platform/apple"
-          - "$(PROJECT_DIR)/libs/SDL3/include"
-          - "$(PROJECT_DIR)/libs/bgfx.cmake/bgfx/include"
-          - "$(PROJECT_DIR)/libs/bgfx.cmake/bx/include"
-          - "$(PROJECT_DIR)/libs/bgfx.cmake/bx/include/compat/ios"
-          - "$(PROJECT_DIR)/libs/bgfx.cmake/bimg/include"
-          - "$(PROJECT_DIR)/libs/nlohmann"
-          - "$(PROJECT_DIR)/libs/ffmpeg-kit/prebuilt/apple-ios-arm64/ffmpeg/include"
-        # Framework search paths (iOS device)
-        FRAMEWORK_SEARCH_PATHS:
-          - "$(inherited)"
-          - "$(PROJECT_DIR)/libs/ffmpeg-kit/prebuilt/apple-ios-arm64/ffmpeg/framework"
-        # Library search paths (iOS device)
-        LIBRARY_SEARCH_PATHS:
-          - "$(inherited)"
-          - "$(PROJECT_DIR)/libs/SDL3/build-ios-device/Release-iphoneos"
-          - "$(PROJECT_DIR)/libs/SDL3_ttf/build-ios-device/Release-iphoneos"
-          - "$(PROJECT_DIR)/libs/bgfx.cmake/build-ios-device/cmake/bgfx/Release-iphoneos"
-          - "$(PROJECT_DIR)/libs/bgfx.cmake/build-ios-device/cmake/bimg/Release-iphoneos"
-          - "$(PROJECT_DIR)/libs/bgfx.cmake/build-ios-device/cmake/bx/Release-iphoneos"
-        # Other linker flags
-        OTHER_LDFLAGS:
-          - "$(inherited)"
-          - "-lSDL3"
-          - "-lSDL3_ttf"
-          - "-lbgfx"
-          - "-lbimg"
-          - "-lbx"
-          - "-framework Metal"
-          - "-framework MetalKit"
-          - "-framework QuartzCore"
-          - "-framework CoreGraphics"
-          - "-framework CoreVideo"
-          - "-framework CoreAudio"
-          - "-framework AudioToolbox"
-          - "-framework AVFoundation"
-          - "-framework GameController"
-          - "-framework CoreHaptics"
-          - "-framework CoreMotion"
-          - "-framework CoreBluetooth"
-          - "-framework VideoToolbox"
-          - "-framework CoreMedia"
-          - "-framework Security"
-          - "-liconv"
-          - "-lbz2"
-          - "-lz"
-          - "-lsqlite3"
-
-    dependencies:
-      - framework: libs/ffmpeg-kit/prebuilt/apple-ios-arm64/ffmpeg/framework/libavcodec.framework
-        embed: true
-      - framework: libs/ffmpeg-kit/prebuilt/apple-ios-arm64/ffmpeg/framework/libavformat.framework
-        embed: true
-      - framework: libs/ffmpeg-kit/prebuilt/apple-ios-arm64/ffmpeg/framework/libavutil.framework
-        embed: true
-      - framework: libs/ffmpeg-kit/prebuilt/apple-ios-arm64/ffmpeg/framework/libswresample.framework
-        embed: true
-      - framework: libs/ffmpeg-kit/prebuilt/apple-ios-arm64/ffmpeg/framework/libswscale.framework
-        embed: true
-      - framework: libs/ffmpeg-kit/prebuilt/apple-ios-arm64/ffmpeg/framework/libavfilter.framework
-        embed: true
-      - framework: libs/ffmpeg-kit/prebuilt/apple-ios-arm64/ffmpeg/framework/libavdevice.framework
-        embed: true
-
     info:
       path: platform/apple/Info-iOS.plist
       properties:
-        CFBundleName: HopStar
-        CFBundleDisplayName: HopStar
-        CFBundleIdentifier: com.hopstar.editor.ios
-        CFBundleVersion: "1"
-        CFBundleShortVersionString: "1.0"
+        CFBundleDisplayName: HopStarBB
         UILaunchStoryboardName: LaunchScreen
+        UIRequiresFullScreen: true
+        UIStatusBarHidden: true
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIApplicationSupportsIndirectInputEvents: true
+        UIRequiredDeviceCapabilities:
+          - arm64
+          - metal
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UISupportsDocumentBrowser: true
+        NSDocumentsFolderUsageDescription: HopStarBB がファイルを開くために Documents フォルダにアクセスします
+        NSDownloadsFolderUsageDescription: HopStarBB がファイルを開くために Downloads フォルダにアクセスします
+        NSMicrophoneUsageDescription: HopStarBB が音声録音にマイクを使用します
+        NSCameraUsageDescription: HopStarBB がカメラを使用します
+    sources:
+      - path: main.cpp
+      - path: sqlite3.c
+      - path: platform/apple/portaudio_ios.mm
+      - path: AppDelegate.h
+        buildPhase: none
+      - path: AppDelegate.mm
+        buildPhase: none
+      - path: Compile.h
+        buildPhase: none
+      - path: addelem.h
+        buildPhase: none
+      - path: arr.h
+        buildPhase: none
+      - path: arr2.h
+        buildPhase: none
+      - path: audio.h
+        buildPhase: none
+      - path: co.cpp
+        buildPhase: none
+      - path: cobj2a.h
+        buildPhase: none
+      - path: cobj2b.h
+        buildPhase: none
+      - path: cobj2c.h
+        buildPhase: none
+      - path: command_queue.h
+        buildPhase: none
+      - path: db.h
+        buildPhase: none
+      - path: db2.h
+        buildPhase: none
+      - path: elem.h
+        buildPhase: none
+      - path: encode.h
+        buildPhase: none
+      - path: extorch.h
+        buildPhase: none
+      - path: f16c_shortname.h
+        buildPhase: none
+      - path: file_engine.h
+        buildPhase: none
+      - path: file_io_async.h
+        buildPhase: none
+      - path: gc.h
+        buildPhase: none
+      - path: gc2.h
+        buildPhase: none
+      - path: gui.h
+        buildPhase: none
+      - path: http_client.h
+        buildPhase: none
+      - path: http_client_curl.h
+        buildPhase: none
+      - path: http_server.h
+        buildPhase: none
+      - path: imas.h
+        buildPhase: none
+      - path: lldb.h
+        buildPhase: none
+      - path: lldbdriver.h
+        buildPhase: none
+      - path: llvm.h
+        buildPhase: none
+      - path: main.cpp
+        buildPhase: none
+      - path: main3.mm
+        buildPhase: none
+      - path: main4.mm
+        buildPhase: none
+      - path: main5.cpp
+        buildPhase: none
+      - path: main7.cpp
+        buildPhase: none
+      - path: media_processor.h
+        buildPhase: none
+      - path: mem.h
+        buildPhase: none
+      - path: miniaudio.h
+        buildPhase: none
+      - path: newelem.h
+        buildPhase: none
+      - path: obj1a.h
+        buildPhase: none
+      - path: obj1b.h
+        buildPhase: none
+      - path: obj1c.h
+        buildPhase: none
+      - path: obj2a.h
+        buildPhase: none
+      - path: obj2b.h
+        buildPhase: none
+      - path: obj2c.h
+        buildPhase: none
+      - path: objvt.h
+        buildPhase: none
+      - path: objz.h
+        buildPhase: none
+      - path: opt.h
+        buildPhase: none
+      - path: othelem.h
+        buildPhase: none
+      - path: platform_io.h
+        buildPhase: none
+      - path: server_common.h
+        buildPhase: none
+      - path: shader.h
+        buildPhase: none
+      - path: shader2.h
+        buildPhase: none
+      - path: sqlite3.c
+        buildPhase: none
+      - path: sqlite3.h
+        buildPhase: none
+      - path: state.h
+        buildPhase: none
+      - path: stb_image.h
+        buildPhase: none
+      - path: stb_image_write.h
+        buildPhase: none
+      - path: test_pp.h
+        buildPhase: none
+      - path: test_thumbnail.cpp
+        buildPhase: none
+      - path: thread_pool.h
+        buildPhase: none
+      - path: threed.h
+        buildPhase: none
+      - path: thumnailAtlas.h
+        buildPhase: none
+      - path: tiny_gltf.h
+        buildPhase: none
+      - path: ugui.h
+        buildPhase: none
+      - path: webrtc_manager.h
+        buildPhase: none
+      - path: websocket_client.h
+        buildPhase: none
+      - path: websocket_server.h
+        buildPhase: none
+      - path: platform/apple/AppleBridge.h
+        buildPhase: none
+      - path: platform/apple/AppleBridge.mm
+        buildPhase: none
+      - path: platform/apple/AppDelegate.h
+        buildPhase: none
+      - path: platform/apple/AppDelegate.mm
+        buildPhase: none
+      - path: platform/apple/LaunchScreen.storyboard
+      - path: fonts
+        type: folder
+      - path: shaders
+        type: folder
+      - path: imgs
+        type: folder
+      - path: pyonpyon.mp4
+        buildPhase: resources
+        optional: true
+    settings:
+      base:
+        ARCHS: arm64
+        VALID_ARCHS: arm64
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
+        SUPPORTS_MACCATALYST: NO
+        CLANG_CXX_LANGUAGE_STANDARD: c++20
+        GCC_ENABLE_CPP_EXCEPTIONS: YES
+        GCC_ENABLE_CPP_RTTI: YES
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - $(inherited)
+          - BX_CONFIG_DEBUG=0
+          - HOPSTAR_ENABLE_FFMPEG=1
+        OTHER_CPLUSPLUSFLAGS:
+          - $(inherited)
+          - -x
+          - objective-c++
+        # Simulator: 署名不要
+        "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]": ""
+        "CODE_SIGNING_REQUIRED[sdk=iphonesimulator*]": NO
+        "CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]": NO
+        # Device: Automatic signing (Xcode で Team 選択して使う)
+        "CODE_SIGN_STYLE[sdk=iphoneos*]": Automatic
+        "CODE_SIGNING_REQUIRED[sdk=iphoneos*]": YES
+        "CODE_SIGNING_ALLOWED[sdk=iphoneos*]": YES
+        DEVELOPMENT_TEAM: VXVZ9S5JUL
+        PRODUCT_BUNDLE_IDENTIFIER: com.hayakawa.syou1.hopstarbb
+        PRODUCT_NAME: HopStarBB
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(PROJECT_DIR)
+          - $(PROJECT_DIR)/platform/apple
+          - $(PROJECT_DIR)/platform/apple/stubs
+          - $(PROJECT_DIR)/libs/SDL3/include
+          - $(PROJECT_DIR)/libs/SDL3_ttf/include
+          - $(PROJECT_DIR)/libs/bgfx.cmake/bgfx/include
+          - $(PROJECT_DIR)/libs/bgfx.cmake/bx/include
+          - $(PROJECT_DIR)/libs/bgfx.cmake/bx/include/compat/ios
+          - $(PROJECT_DIR)/libs/bgfx.cmake/bimg/include
+          - $(PROJECT_DIR)/libs/nlohmann
+          - $(PROJECT_DIR)/libs/ffmpeg-6.1/build-ios-sim/include
+          - $(PROJECT_DIR)/libs/ffmpeg-6.1/build-ios-device/include
+        "LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]":
+          - $(inherited)
+          - $(PROJECT_DIR)/libs/SDL3/build-ios-sim
+          - $(PROJECT_DIR)/libs/SDL3_ttf/build-ios-sim
+          - $(PROJECT_DIR)/libs/SDL3_ttf/build-ios-sim/external/freetype-build
+          - $(PROJECT_DIR)/libs/SDL3_ttf/build-ios-sim/external/harfbuzz-build
+          - $(PROJECT_DIR)/libs/SDL3_ttf/build-ios-sim/external/plutosvg-guild
+          - $(PROJECT_DIR)/libs/SDL3_ttf/build-ios-sim/external/plutovg-build
+          - $(PROJECT_DIR)/libs/bgfx.cmake/build-ios-sim/cmake/bgfx
+          - $(PROJECT_DIR)/libs/bgfx.cmake/build-ios-sim/cmake/bx
+          - $(PROJECT_DIR)/libs/bgfx.cmake/build-ios-sim/cmake/bimg
+          - $(PROJECT_DIR)/libs/ffmpeg-6.1/build-ios-sim/lib
+        "LIBRARY_SEARCH_PATHS[sdk=iphoneos*]":
+          - $(inherited)
+          - $(PROJECT_DIR)/libs/SDL3/build-ios-device
+          - $(PROJECT_DIR)/libs/SDL3_ttf/build-ios-device
+          - $(PROJECT_DIR)/libs/SDL3_ttf/build-ios-device/external/freetype-build
+          - $(PROJECT_DIR)/libs/SDL3_ttf/build-ios-device/external/harfbuzz-build
+          - $(PROJECT_DIR)/libs/SDL3_ttf/build-ios-device/external/plutosvg-guild
+          - $(PROJECT_DIR)/libs/SDL3_ttf/build-ios-device/external/plutovg-build
+          - $(PROJECT_DIR)/libs/bgfx.cmake/build-ios-device/cmake/bgfx
+          - $(PROJECT_DIR)/libs/bgfx.cmake/build-ios-device/cmake/bx
+          - $(PROJECT_DIR)/libs/bgfx.cmake/build-ios-device/cmake/bimg
+          - $(PROJECT_DIR)/libs/ffmpeg-6.1/build-ios-device/lib
+        OTHER_LDFLAGS:
+          - $(inherited)
+          - -lSDL3
+          - -lSDL3_ttf
+          - -lfreetype
+          - -lharfbuzz
+          - -lplutosvg
+          - -lplutovg
+          - -lbgfx
+          - -lbimg
+          - -lbx
+          - -lavformat
+          - -lavcodec
+          - -lswscale
+          - -lswresample
+          - -lavutil
+          - -lavfilter
+          - -lavdevice
+          - -liconv
+          - -lbz2
+          - -lz
+        LD_RUNPATH_SEARCH_PATHS:
+          - $(inherited)
+          - "@executable_path/Frameworks"
+    dependencies:
+      - sdk: Foundation.framework
+      - sdk: UIKit.framework
+      - sdk: Metal.framework
+      - sdk: MetalKit.framework
+      - sdk: QuartzCore.framework
+      - sdk: CoreGraphics.framework
+      - sdk: CoreVideo.framework
+      - sdk: CoreMedia.framework
+      - sdk: CoreAudio.framework
+      - sdk: AudioToolbox.framework
+      - sdk: AVFoundation.framework
+      - sdk: GameController.framework
+      - sdk: CoreHaptics.framework
+      - sdk: CoreMotion.framework
+      - sdk: CoreBluetooth.framework
+      - sdk: VideoToolbox.framework
+      - sdk: CoreText.framework
+      - sdk: ImageIO.framework
+      - sdk: UniformTypeIdentifiers.framework
+      - sdk: Photos.framework
+      - sdk: UserNotifications.framework
+      - sdk: Security.framework
+      - sdk: CoreServices.framework
+      - sdk: OpenGLES.framework
 
 schemes:
-  HopStar-macOS:
+  HopStarBB:
     build:
       targets:
-        HopStar-macOS: all
+        HopStarBB: all
     run:
-      config: Debug
-    test:
-      config: Debug
-    profile:
-      config: Release
-    analyze:
-      config: Debug
-    archive:
-      config: Release
-
-  HopStar-iOS:
+      customExecutable: HopStar_macOS
+      customWorkingDirectory: $(SRCROOT)
+  HopStarBB-iOS:
     build:
       targets:
-        HopStar-iOS: all
+        HopStarBB-iOS: all
     run:
       config: Debug
-    test:
-      config: Debug
-    profile:
-      config: Release
-    analyze:
-      config: Debug
-    archive:
-      config: Release

@@ -1,3 +1,22 @@
 *.dll
 *.ilk
 clang3/*.exe
+
+# Build artifacts
+HopStar_macOS
+build/
+.DS_Store
+
+# Generated Xcode project (xcodegen)
+HopStarBB.xcodeproj/
+
+# External library source/builds (large, vendored)
+libs/SDL3/
+libs/SDL3_ttf/
+libs/bgfx.cmake/
+libs/ffmpeg-6.1/
+libs/ffmpeg-6.1.tar.xz
+libs/ffmpeg-build/
+
+# project.yml backup files
+project.yml.bak*
